@@ -1,10 +1,22 @@
-use egui::Context;
+use std::time::Duration;
+
+use egui::{Context, Event, FullOutput, RawInput, ViewportId};
 
 use crate::wgpu_wrapper::WgpuWrapper;
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct Gui {
     egui_ctx: Context,
+    needs_repaint: bool,
+}
+
+impl Default for Gui {
+    fn default() -> Self {
+        Self {
+            egui_ctx: Context::default(),
+            needs_repaint: true,
+        }
+    }
 }
 
 impl Gui {
@@ -12,7 +24,40 @@ impl Gui {
         Gui::default()
     }
 
-    pub fn render(&mut self, wgpu: &mut WgpuWrapper) -> anyhow::Result<()> {
+    pub fn handle_events(&mut self, events: Vec<Event>) {
+        let raw_input = RawInput {
+            events,
+            focused: true,
+            ..Default::default()
+        };
+        self.build_output(raw_input);
+    }
+
+    fn build_output(&mut self, raw_input: RawInput) -> FullOutput {
+        let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("Alt-Tab for Wayland");
+                ui.label("Hello from egui!");
+            });
+        });
+
+        self.needs_repaint = self.needs_repaint
+            || full_output.viewport_output[&ViewportId::ROOT].repaint_delay != Duration::MAX;
+
+        tracing::debug!(
+            "repaint delay {:?}, cause {:?}",
+            full_output.viewport_output[&ViewportId::ROOT].repaint_delay,
+            self.egui_ctx.repaint_causes()
+        );
+
+        full_output
+    }
+
+    pub fn needs_repaint(&self) -> bool {
+        self.needs_repaint
+    }
+
+    pub fn paint(&mut self, wgpu: &mut WgpuWrapper) -> anyhow::Result<()> {
         tracing::info!("render() called");
 
         let output = wgpu.surface.get_current_texture()?;
@@ -25,21 +70,17 @@ impl Gui {
         let width = wgpu.surface_config.width;
         let height = wgpu.surface_config.height;
 
-        // Build egui UI
+        // Build egui UI with collected events
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
                 egui::vec2(width as f32, height as f32),
             )),
+            focused: true,
             ..Default::default()
         };
 
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("Alt-Tab for Wayland");
-                ui.label("Hello from egui!");
-            });
-        });
+        let full_output = self.build_output(raw_input);
 
         let mut encoder = wgpu
             .device
@@ -102,6 +143,7 @@ impl Gui {
 
         wgpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        self.needs_repaint = false;
 
         Ok(())
     }

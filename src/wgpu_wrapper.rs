@@ -1,5 +1,5 @@
 use crate::wayland_client::RawHandles;
-
+use std::fmt;
 pub struct WgpuWrapper {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -99,5 +99,17 @@ impl WgpuWrapper {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
+    }
+}
+
+// we need this because egui_wgpu::Renderer doesn't implement Debug ugh
+impl fmt::Debug for WgpuWrapper {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WgpuWrapper")
+            .field("device", &self.device)
+            .field("queue", &self.queue)
+            .field("surface", &self.surface)
+            .field("surface_config", &self.surface_config)
+            .finish()
     }
 }

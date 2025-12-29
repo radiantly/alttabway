@@ -12,15 +12,17 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tracing::{debug, info, trace, warn};
 use wayland_client::EventQueue;
-use wgpu::SurfaceTargetUnsafe;
 
+#[derive(Debug)]
 pub enum MaybeWgpuWrapper {
     Uninitialized,
     Initializing,
     Initialized(WgpuWrapper),
 }
 
+#[derive(Debug)]
 enum DaemonEvent {
     WgpuInit(anyhow::Result<WgpuWrapper>),
     Show,
@@ -38,20 +40,18 @@ pub struct Daemon {
     command_tx: UnboundedSender<DaemonEvent>,
     command_rx: UnboundedReceiver<DaemonEvent>,
     gui: Gui,
+    requested_repaint: bool,
+    visible: bool,
 }
-
-// TODO: fix this hack
-pub struct SurfaceTargetUnsafeUnsafe {
-    pub target: SurfaceTargetUnsafe,
-}
-unsafe impl Send for SurfaceTargetUnsafeUnsafe {}
 
 impl Daemon {
     pub async fn start() -> anyhow::Result<()> {
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        tracing::info!("Initialized wayland layer shell window");
+
+        debug!("Initialized wayland layer client");
+
         let mut daemon = Self {
             height: 400,
             width: 800,
@@ -62,6 +62,8 @@ impl Daemon {
             command_tx,
             command_rx,
             gui: Default::default(),
+            requested_repaint: false,
+            visible: false,
         };
 
         Daemon::run_loop(&mut daemon).await
@@ -72,7 +74,7 @@ impl Daemon {
             self.wayland_client_q.flush()?;
 
             let Some(read_guard) = self.wayland_client_q.prepare_read() else {
-                // Events pending, dispatch them
+                debug!("no read guard, events pending");
                 self.wayland_client_q
                     .dispatch_pending(&mut self.wayland_client)?;
                 continue;
@@ -82,16 +84,18 @@ impl Daemon {
 
             tokio::select! {
                 _ = async_fd.readable() => {
+                    trace!("fd is readable, events pending");
+
                     drop(async_fd);
 
-                    // Actually read from the socket
                     read_guard.read()?;
 
-                    // Dispatch the events we just read
                     self.wayland_client_q
                         .dispatch_pending(&mut self.wayland_client)?;
                 },
                 Some(event) = self.wayland_client_rx.recv() => {
+                    trace!("received wayland client event {:?}", event);
+
                     match event {
                         WaylandClientEvent::LayerShellConfigure(configure) => {
                             let (width, height) = configure.new_size;
@@ -111,9 +115,30 @@ impl Daemon {
                                 MaybeWgpuWrapper::Initialized(_) => self.update_size(width, height)?
                             }
                         }
+                        WaylandClientEvent::Egui(events) => {
+
+                            for event in events.iter() {
+                                match event {
+                                    egui::Event::Key { key, .. } => tracing::info!("keyboard event: {:?}", key),
+                                    egui::Event::PointerMoved { .. } => tracing::info!("pointer event"),
+                                    _ => ()
+                                }
+                            }
+
+                            self.gui.handle_events(events);
+
+
+                            if self.gui.needs_repaint() {
+                                self.request_repaint();
+                            }
+                        }
+                        WaylandClientEvent::Frame => self.paint()?,
+                        WaylandClientEvent::Hide => self.update_visibility(false)?
                     }
                 },
                 Some(event) = self.command_rx.recv() => {
+                    trace!("received daemon event {:?}", event);
+
                     match event {
                         DaemonEvent::WgpuInit(wgpu_wrapper_result) =>
                             match wgpu_wrapper_result {
@@ -122,54 +147,78 @@ impl Daemon {
                                     let command_tx = self.command_tx.clone();
                                     tokio::spawn(async move {
                                         loop {
-                                            thread::sleep(Duration::from_secs(2));
+                                            thread::sleep(Duration::from_secs(3));
                                             command_tx.send(DaemonEvent::Show).unwrap();
-                                            thread::sleep(Duration::from_secs(2));
+                                            thread::sleep(Duration::from_secs(5));
                                             command_tx.send(DaemonEvent::Hide).unwrap();
                                         }
                                     });
                                 }
                                 Err(err) => bail!(err)
                             }
-                        DaemonEvent::Show => {
-                            self.show()?
-                        }
-                        DaemonEvent::Hide => {
-                            self.hide()?
-                        }
+                        DaemonEvent::Show => self.update_visibility(true)?,
+                        DaemonEvent::Hide => self.update_visibility(false)?
                     }
                 }
-            };
+            }
         }
     }
 
-    pub fn show(&mut self) -> anyhow::Result<()> {
-        self.wayland_client
-            .layer_surface
-            .set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        self.wayland_client
-            .layer_surface
-            .set_size(self.width, self.height);
-        self.wayland_client.layer_surface.commit();
-        self.render()
+    fn request_repaint(&mut self) {
+        if self.requested_repaint {
+            return;
+        }
+        self.requested_repaint = true;
+
+        trace!("repaint requested");
+        self.wayland_client.wl_surface.frame(
+            &self.wayland_client_q.handle(),
+            self.wayland_client.wl_surface.clone(),
+        );
+        self.wayland_client.wl_surface.commit();
     }
 
-    pub fn hide(&mut self) -> anyhow::Result<()> {
-        self.wayland_client
-            .layer_surface
-            .set_keyboard_interactivity(KeyboardInteractivity::None);
-        self.wayland_client.layer_surface.commit();
+    fn update_visibility(&mut self, visible: bool) -> anyhow::Result<()> {
+        if self.visible == visible {
+            return Ok(());
+        }
+
+        self.visible = visible;
+
+        if visible {
+            self.wayland_client
+                .layer_surface
+                .set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+
+            // TODO: move sizing out of here
+            self.wayland_client
+                .layer_surface
+                .set_size(self.width, self.height);
+
+            self.wayland_client.layer_surface.commit();
+        } else {
+            self.wayland_client
+                .layer_surface
+                .set_keyboard_interactivity(KeyboardInteractivity::None);
+        }
+
+        self.paint()
+    }
+
+    fn paint(&mut self) -> anyhow::Result<()> {
+        self.requested_repaint = false;
+
+        if self.visible {
+            if let MaybeWgpuWrapper::Initialized(wgpu) = &mut self.wgpu {
+                return self.gui.paint(wgpu);
+            }
+
+            warn!("paint requested but wgpu has not yet finished initializing");
+        }
+
         self.wayland_client.wl_surface.attach(None, 0, 0);
         self.wayland_client.wl_surface.commit();
         Ok(())
-    }
-
-    pub fn render(&mut self) -> anyhow::Result<()> {
-        let MaybeWgpuWrapper::Initialized(wgpu) = &mut self.wgpu else {
-            bail!("wgpu is notinitialized!");
-        };
-
-        self.gui.render(wgpu)
     }
 
     fn update_size(&mut self, width: u32, height: u32) -> anyhow::Result<()> {

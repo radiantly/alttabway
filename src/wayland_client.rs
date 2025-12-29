@@ -8,12 +8,18 @@ use raw_window_handle::{
 };
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
 use smithay_client_toolkit::delegate_compositor;
+use smithay_client_toolkit::delegate_keyboard;
 use smithay_client_toolkit::delegate_layer;
 use smithay_client_toolkit::delegate_output;
+use smithay_client_toolkit::delegate_pointer;
 use smithay_client_toolkit::delegate_registry;
+use smithay_client_toolkit::delegate_seat;
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::registry_handlers;
+use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
@@ -21,11 +27,113 @@ use smithay_client_toolkit::shell::wlr_layer::{
 };
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::wl_output::WlOutput;
+use wayland_client::protocol::wl_seat::WlSeat;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, EventQueue, Proxy, QueueHandle};
 
+#[derive(Debug)]
 pub enum WaylandClientEvent {
     LayerShellConfigure(LayerSurfaceConfigure),
+    Egui(Vec<egui::Event>),
+    Frame,
+    Hide,
+}
+
+impl WaylandClientEvent {
+    fn to_egui_modifier(modifiers: Modifiers) -> egui::Modifiers {
+        egui::Modifiers {
+            alt: modifiers.alt,
+            ctrl: modifiers.ctrl,
+            shift: modifiers.shift,
+            mac_cmd: false,
+            command: modifiers.ctrl,
+        }
+    }
+
+    fn to_egui_button(button: u32) -> egui::PointerButton {
+        match button {
+            272 => egui::PointerButton::Primary,
+            273 => egui::PointerButton::Secondary,
+            274 => egui::PointerButton::Middle,
+            _ => egui::PointerButton::Extra1,
+        }
+    }
+
+    fn to_egui_pos2(position: (f64, f64)) -> egui::Pos2 {
+        egui::Pos2 {
+            x: position.0 as f32,
+            y: position.1 as f32,
+        }
+    }
+}
+
+impl TryFrom<(&[PointerEvent], Modifiers)> for WaylandClientEvent {
+    type Error = &'static str;
+
+    fn try_from(value: (&[PointerEvent], Modifiers)) -> Result<Self, Self::Error> {
+        let (pointer_events, modifiers) = value;
+        let modifiers = Self::to_egui_modifier(modifiers);
+
+        let events: Vec<_> = pointer_events
+            .iter()
+            .filter_map(|event| match event.kind {
+                PointerEventKind::Motion { .. } => Some(egui::Event::PointerMoved(
+                    Self::to_egui_pos2(event.position),
+                )),
+                PointerEventKind::Press { button, .. } => Some(egui::Event::PointerButton {
+                    pos: Self::to_egui_pos2(event.position),
+                    button: Self::to_egui_button(button),
+                    pressed: true,
+                    modifiers,
+                }),
+                PointerEventKind::Release { button, .. } => Some(egui::Event::PointerButton {
+                    pos: Self::to_egui_pos2(event.position),
+                    button: Self::to_egui_button(button),
+                    pressed: false,
+                    modifiers,
+                }),
+                _ => None,
+            })
+            .collect();
+
+        if events.is_empty() {
+            return Err("no relevant pointer events to send!");
+        }
+        Ok(Self::Egui(events))
+    }
+}
+
+impl TryFrom<(KeyEvent, bool, bool, Modifiers)> for WaylandClientEvent {
+    type Error = &'static str;
+
+    fn try_from(value: (KeyEvent, bool, bool, Modifiers)) -> Result<Self, Self::Error> {
+        let (key_event, pressed, repeat, modifiers) = value;
+        let modifiers = Self::to_egui_modifier(modifiers);
+
+        if let Keysym::Escape = key_event.keysym {
+            return Ok(WaylandClientEvent::Hide);
+        }
+
+        let key = match key_event.keysym {
+            Keysym::Up => egui::Key::ArrowUp,
+            Keysym::Down => egui::Key::ArrowDown,
+            Keysym::Left => egui::Key::ArrowLeft,
+            Keysym::Right => egui::Key::ArrowRight,
+            Keysym::Tab => egui::Key::Tab,
+            Keysym::Return => egui::Key::Enter,
+            _ => return Err("keyboard event not mapped"),
+        };
+
+        let event = egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers,
+        };
+
+        Ok(Self::Egui(vec![event]))
+    }
 }
 
 #[derive(Debug)]
@@ -34,10 +142,12 @@ pub struct WaylandClient {
     output_state: OutputState,
     compositor_state: CompositorState,
     layer_shell: LayerShell,
+    seat_state: SeatState,
     pub layer_surface: LayerSurface,
     pub wl_surface: WlSurface,
     connection: Connection,
     wl_tx: UnboundedSender<WaylandClientEvent>,
+    modifiers: Modifiers,
 }
 
 pub struct RawHandles {
@@ -77,15 +187,19 @@ impl WaylandClient {
 
         let (wl_tx, wl_rx) = mpsc::unbounded_channel();
 
+        let seat_state = SeatState::new(&globals, &qh);
+
         let wayland_app = Self {
             registry_state: RegistryState::new(&globals),
             output_state: OutputState::new(&globals, &qh),
             connection,
             compositor_state,
             layer_shell,
+            seat_state,
             layer_surface,
             wl_surface,
             wl_tx,
+            modifiers: Default::default(),
         };
 
         Ok((wayland_app, event_queue, wl_rx))
@@ -140,6 +254,7 @@ impl CompositorHandler for WaylandClient {
         _surface: &WlSurface,
         _time: u32,
     ) {
+        self.wl_tx.send(WaylandClientEvent::Frame).unwrap();
     }
 
     fn surface_enter(
@@ -204,10 +319,146 @@ impl ProvidesRegistryState for WaylandClient {
         &mut self.registry_state
     }
 
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
+}
+
+impl SeatHandler for WaylandClient {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Keyboard
+            && self.seat_state.get_keyboard(qh, &seat, None).is_err()
+        {
+            tracing::warn!("Failed to get keyboard capability");
+        }
+
+        if capability == Capability::Pointer && self.seat_state.get_pointer(qh, &seat).is_err() {
+            tracing::warn!("Failed to get pointer capability");
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wayland_client::protocol::wl_seat::WlSeat,
+        _capability: Capability,
+    ) {
+    }
+
+    fn remove_seat(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wayland_client::protocol::wl_seat::WlSeat,
+    ) {
+    }
+}
+
+impl KeyboardHandler for WaylandClient {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _surface: &WlSurface,
+        _serial: u32,
+        _raw: &[u32],
+        _keysyms: &[Keysym],
+    ) {
+    }
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _surface: &WlSurface,
+        _serial: u32,
+    ) {
+    }
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        if let Ok(event) = (event, true, false, self.modifiers).try_into() {
+            self.wl_tx.send(event).unwrap()
+        }
+    }
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        if let Ok(event) = (event, false, false, self.modifiers).try_into() {
+            self.wl_tx.send(event).unwrap()
+        }
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _serial: u32,
+        modifiers: Modifiers,
+        _raw_modifiers: smithay_client_toolkit::seat::keyboard::RawModifiers,
+        _layout: u32,
+    ) {
+        self.modifiers = modifiers;
+    }
+
+    fn repeat_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: KeyEvent,
+    ) {
+        if let Ok(event) = (event, true, true, self.modifiers).try_into() {
+            self.wl_tx.send(event).unwrap()
+        }
+    }
+}
+
+impl PointerHandler for WaylandClient {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wayland_client::protocol::wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        if let Ok(event) = (events, self.modifiers).try_into() {
+            self.wl_tx.send(event).unwrap()
+        }
+    }
 }
 
 delegate_compositor!(WaylandClient);
 delegate_output!(WaylandClient);
 delegate_layer!(WaylandClient);
+delegate_seat!(WaylandClient);
+delegate_keyboard!(WaylandClient);
+delegate_pointer!(WaylandClient);
 delegate_registry!(WaylandClient);
