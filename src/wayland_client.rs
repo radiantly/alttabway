@@ -1,35 +1,47 @@
-use std::ffi::c_void;
-use std::ptr::NonNull;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-
 use anyhow::Context;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState};
-use smithay_client_toolkit::delegate_compositor;
-use smithay_client_toolkit::delegate_keyboard;
-use smithay_client_toolkit::delegate_layer;
-use smithay_client_toolkit::delegate_output;
-use smithay_client_toolkit::delegate_pointer;
-use smithay_client_toolkit::delegate_registry;
-use smithay_client_toolkit::delegate_seat;
-use smithay_client_toolkit::output::{OutputHandler, OutputState};
-use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
-use smithay_client_toolkit::registry_handlers;
-use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
-use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
-use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
-use smithay_client_toolkit::shell::WaylandSurface;
-use smithay_client_toolkit::shell::wlr_layer::{
-    Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-    LayerSurfaceConfigure,
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
+    delegate_registry, delegate_seat,
+    output::{OutputHandler, OutputState},
+    reexports::{
+        client::{
+            self,
+            globals::registry_queue_init,
+            protocol::{
+                wl_keyboard::WlKeyboard,
+                wl_output::{Transform, WlOutput},
+                wl_pointer::WlPointer,
+                wl_seat::WlSeat,
+                wl_surface::WlSurface,
+            },
+            {Connection, Dispatch, EventQueue, Proxy, QueueHandle},
+        },
+        protocols_wlr::foreign_toplevel::v1::client::{
+            zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+            zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+        },
+    },
+    registry::{ProvidesRegistryState, RegistryState},
+    registry_handlers,
+    seat::{
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
+        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        {Capability, SeatHandler, SeatState},
+    },
+    shell::{
+        WaylandSurface,
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
+        },
+    },
 };
-use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::wl_output::WlOutput;
-use wayland_client::protocol::wl_seat::WlSeat;
-use wayland_client::protocol::wl_surface::WlSurface;
-use wayland_client::{Connection, EventQueue, Proxy, QueueHandle};
+use std::{ffi::c_void, ptr::NonNull};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
 pub enum WaylandClientEvent {
@@ -136,6 +148,13 @@ impl TryFrom<(KeyEvent, bool, bool, Modifiers)> for WaylandClientEvent {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TopLevelWindow {
+    handle: ZwlrForeignToplevelHandleV1,
+    title: String,
+    app_id: String,
+}
+
 #[derive(Debug)]
 pub struct WaylandClient {
     registry_state: RegistryState,
@@ -148,6 +167,7 @@ pub struct WaylandClient {
     connection: Connection,
     wl_tx: UnboundedSender<WaylandClientEvent>,
     modifiers: Modifiers,
+    toplevel_windows: Vec<TopLevelWindow>,
 }
 
 pub struct RawHandles {
@@ -189,6 +209,10 @@ impl WaylandClient {
 
         let seat_state = SeatState::new(&globals, &qh);
 
+        // Bind the foreign toplevel manager
+        let _toplevel_manager =
+            globals.bind::<ZwlrForeignToplevelManagerV1, _, _>(&qh, 3..=3, ())?;
+
         let wayland_app = Self {
             registry_state: RegistryState::new(&globals),
             output_state: OutputState::new(&globals, &qh),
@@ -200,6 +224,7 @@ impl WaylandClient {
             wl_surface,
             wl_tx,
             modifiers: Default::default(),
+            toplevel_windows: Vec::new(),
         };
 
         Ok((wayland_app, event_queue, wl_rx))
@@ -243,7 +268,7 @@ impl CompositorHandler for WaylandClient {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _surface: &WlSurface,
-        _new_transform: wayland_client::protocol::wl_output::Transform,
+        _new_transform: Transform,
     ) {
     }
 
@@ -302,10 +327,6 @@ impl LayerShellHandler for WaylandClient {
         layer_surface_configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        tracing::warn!(
-            "conf {:?}",
-            _connection.backend().display_ptr() as *mut c_void
-        );
         self.wl_tx
             .send(WaylandClientEvent::LayerShellConfigure(
                 layer_surface_configure,
@@ -351,18 +372,12 @@ impl SeatHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
+        _seat: WlSeat,
         _capability: Capability,
     ) {
     }
 
-    fn remove_seat(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: wayland_client::protocol::wl_seat::WlSeat,
-    ) {
-    }
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
 }
 
 impl KeyboardHandler for WaylandClient {
@@ -370,7 +385,7 @@ impl KeyboardHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         _surface: &WlSurface,
         _serial: u32,
         _raw: &[u32],
@@ -382,7 +397,7 @@ impl KeyboardHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         _surface: &WlSurface,
         _serial: u32,
     ) {
@@ -392,7 +407,7 @@ impl KeyboardHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         _serial: u32,
         event: KeyEvent,
     ) {
@@ -405,7 +420,7 @@ impl KeyboardHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         _serial: u32,
         event: KeyEvent,
     ) {
@@ -418,7 +433,7 @@ impl KeyboardHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         _serial: u32,
         modifiers: Modifiers,
         _raw_modifiers: smithay_client_toolkit::seat::keyboard::RawModifiers,
@@ -431,7 +446,7 @@ impl KeyboardHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _keyboard: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        _keyboard: &WlKeyboard,
         _serial: u32,
         event: KeyEvent,
     ) {
@@ -446,7 +461,7 @@ impl PointerHandler for WaylandClient {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _pointer: &wayland_client::protocol::wl_pointer::WlPointer,
+        _pointer: &WlPointer,
         events: &[PointerEvent],
     ) {
         if let Ok(event) = (events, self.modifiers).try_into() {
@@ -462,3 +477,116 @@ delegate_seat!(WaylandClient);
 delegate_keyboard!(WaylandClient);
 delegate_pointer!(WaylandClient);
 delegate_registry!(WaylandClient);
+
+// Foreign toplevel manager implementation
+impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WaylandClient {
+    fn event(
+        state: &mut Self,
+        _manager: &ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use zwlr_foreign_toplevel_manager_v1::Event;
+
+        match event {
+            Event::Toplevel { toplevel } => {
+                state.toplevel_windows.push(TopLevelWindow {
+                    handle: toplevel,
+                    title: String::new(),
+                    app_id: String::new(),
+                });
+            }
+            Event::Finished => {
+                tracing::info!(
+                    "Toplevel manager finished - compositor is shutting down the protocol"
+                );
+                state.toplevel_windows.clear();
+            }
+            _ => {}
+        }
+    }
+
+    client::event_created_child!(WaylandClient, ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ())
+    ]);
+}
+
+// Foreign toplevel handle implementation
+impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
+    fn event(
+        state: &mut Self,
+        handle: &ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use zwlr_foreign_toplevel_handle_v1::Event;
+
+        match event {
+            Event::Title { title } => {
+                if let Some(info) = state
+                    .toplevel_windows
+                    .iter_mut()
+                    .find(|window| window.handle == *handle)
+                {
+                    info.title = title;
+                }
+            }
+            Event::AppId { app_id } => {
+                if let Some(info) = state
+                    .toplevel_windows
+                    .iter_mut()
+                    .find(|window| window.handle == *handle)
+                {
+                    info.app_id = app_id;
+                }
+            }
+            Event::Closed => {
+                state
+                    .toplevel_windows
+                    .retain(|window| window.handle != *handle);
+            }
+            Event::State {
+                state: window_state,
+            } => {
+                let activated = zwlr_foreign_toplevel_handle_v1::State::Activated as u8;
+
+                if window_state.contains(&activated) {
+                    // rotate_right may be more efficient here
+                    if let Some(pos) = state
+                        .toplevel_windows
+                        .iter()
+                        .position(|w| w.handle == *handle)
+                    {
+                        let window = state.toplevel_windows.remove(pos);
+                        state.toplevel_windows.insert(0, window);
+                    }
+                }
+            }
+
+            // this set of events have all been processed
+            Event::Done => {
+                let list = state
+                    .toplevel_windows
+                    .iter()
+                    .map(|window| window.app_id.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                tracing::debug!("windows: {}", list);
+            }
+
+            // windows have changed monitors
+            // we get this from the IPC, so I don't think we need to store it
+            Event::OutputEnter { output: _ } => (),
+            Event::OutputLeave { output: _ } => (),
+
+            // when the parent of the toplevel changes(?)
+            Event::Parent { parent: _ } => (),
+            _ => todo!(),
+        }
+    }
+}

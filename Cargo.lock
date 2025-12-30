@@ -44,7 +44,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayland-backend",
- "wayland-client",
  "wgpu",
 ]
 

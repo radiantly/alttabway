@@ -96,6 +96,12 @@ impl WgpuWrapper {
     }
 
     pub fn update_size(&mut self, width: u32, height: u32) {
+        if (self.surface_config.width, self.surface_config.height) == (width, height) {
+            return;
+        }
+
+        tracing::debug!("updating wgpu size to {}x{}!!", width, height);
+
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);

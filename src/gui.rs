@@ -58,10 +58,9 @@ impl Gui {
     }
 
     pub fn paint(&mut self, wgpu: &mut WgpuWrapper) -> anyhow::Result<()> {
-        tracing::info!("render() called");
+        tracing::trace!("render() called");
 
         let output = wgpu.surface.get_current_texture()?;
-        tracing::info!("Got texture, rendering...");
 
         let view = output
             .texture
