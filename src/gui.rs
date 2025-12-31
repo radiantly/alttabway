@@ -44,7 +44,7 @@ impl Gui {
         self.needs_repaint = self.needs_repaint
             || full_output.viewport_output[&ViewportId::ROOT].repaint_delay != Duration::MAX;
 
-        tracing::debug!(
+        tracing::trace!(
             "repaint delay {:?}, cause {:?}",
             full_output.viewport_output[&ViewportId::ROOT].repaint_delay,
             self.egui_ctx.repaint_causes()

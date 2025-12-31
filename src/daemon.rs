@@ -43,7 +43,7 @@ pub struct Daemon {
     command_tx: UnboundedSender<DaemonEvent>,
     command_rx: UnboundedReceiver<DaemonEvent>,
     gui: Gui,
-    requested_repaint: bool,
+    pending_repaint: bool,
     visible: bool,
     wl_buffer_attached: bool,
 }
@@ -66,7 +66,7 @@ impl Daemon {
             command_tx,
             command_rx,
             gui: Default::default(),
-            requested_repaint: false,
+            pending_repaint: false,
             visible: false,
             wl_buffer_attached: false,
         };
@@ -123,7 +123,7 @@ impl Daemon {
                                     wgpu.update_size(width, height);
 
                                     // Important note.
-                                    // If at any point wl_surface.commit() is called without any active buffer,
+                                    // If at any point wl_surface.commit() is called without an attached buffer,
                                     // the compositor may just send a configure event
                                     // may result in an infinite loop if not careful
 
@@ -136,17 +136,7 @@ impl Daemon {
                             }
                         }
                         WaylandClientEvent::Egui(events) => {
-
-                            for event in events.iter() {
-                                match event {
-                                    egui::Event::Key { key, .. } => tracing::info!("keyboard event: {:?}", key),
-                                    egui::Event::PointerMoved { .. } => tracing::info!("pointer event"),
-                                    _ => ()
-                                }
-                            }
-
                             self.gui.handle_events(events);
-
 
                             if self.gui.needs_repaint() {
                                 self.request_repaint()?
@@ -192,10 +182,10 @@ impl Daemon {
             return self.paint();
         }
 
-        if self.requested_repaint {
+        if self.pending_repaint {
             return Ok(());
         }
-        self.requested_repaint = true;
+        self.pending_repaint = true;
 
         trace!("repaint requested");
         self.wayland_client.wl_surface.frame(
@@ -234,7 +224,7 @@ impl Daemon {
     }
 
     fn paint(&mut self) -> anyhow::Result<()> {
-        self.requested_repaint = false;
+        self.pending_repaint = false;
 
         if self.visible {
             if let MaybeWgpuWrapper::Initialized(wgpu) = &mut self.wgpu {
