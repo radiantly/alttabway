@@ -1,19 +1,28 @@
-use std::time::Duration;
+use std::{fmt::Debug, time::Duration};
 
 use egui::{Context, Event, FullOutput, RawInput, ViewportId};
 
-use crate::wgpu_wrapper::WgpuWrapper;
+use crate::wgpu_wrapper::{WgpuSurface, WgpuWrapper};
 
-#[derive(Debug)]
 pub struct Gui {
     egui_ctx: Context,
+    egui_renderer: Option<egui_wgpu::Renderer>,
     needs_repaint: bool,
+}
+
+impl Debug for Gui {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Gui")
+            .field("needs_repaint", &self.needs_repaint)
+            .finish()
+    }
 }
 
 impl Default for Gui {
     fn default() -> Self {
         Self {
             egui_ctx: Context::default(),
+            egui_renderer: None,
             needs_repaint: true,
         }
     }
@@ -57,17 +66,17 @@ impl Gui {
         self.needs_repaint
     }
 
-    pub fn paint(&mut self, wgpu: &mut WgpuWrapper) -> anyhow::Result<()> {
+    pub fn paint(&mut self, wgpu: &mut WgpuWrapper, wsurf: &mut WgpuSurface) -> anyhow::Result<()> {
         tracing::trace!("render() called");
 
-        let output = wgpu.surface.get_current_texture()?;
+        let output = wsurf.surface.get_current_texture()?;
 
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let width = wgpu.surface_config.width;
-        let height = wgpu.surface_config.height;
+        let width = wsurf.surface_config.width;
+        let height = wsurf.surface_config.height;
 
         // Build egui UI with collected events
         let raw_input = egui::RawInput {
@@ -94,12 +103,19 @@ impl Gui {
 
         let clipped_primitives = self.egui_ctx.tessellate(full_output.shapes, 1.0);
 
+        let egui_renderer = self.egui_renderer.get_or_insert_with(|| {
+            egui_wgpu::Renderer::new(
+                &wgpu.device,
+                wsurf.surface_config.format,
+                egui_wgpu::RendererOptions::default(),
+            )
+        });
+
         for (id, image_delta) in &full_output.textures_delta.set {
-            wgpu.egui_renderer
-                .update_texture(&wgpu.device, &wgpu.queue, *id, image_delta);
+            egui_renderer.update_texture(&wgpu.device, &wgpu.queue, *id, image_delta);
         }
 
-        wgpu.egui_renderer.update_buffers(
+        egui_renderer.update_buffers(
             &wgpu.device,
             &wgpu.queue,
             &mut encoder,
@@ -129,7 +145,7 @@ impl Gui {
                 occlusion_query_set: None,
             });
 
-            wgpu.egui_renderer.render(
+            egui_renderer.render(
                 &mut render_pass.forget_lifetime(),
                 &clipped_primitives,
                 &screen_descriptor,
@@ -137,7 +153,7 @@ impl Gui {
         }
 
         for id in &full_output.textures_delta.free {
-            wgpu.egui_renderer.free_texture(id);
+            egui_renderer.free_texture(id);
         }
 
         wgpu.queue.submit(std::iter::once(encoder.finish()));

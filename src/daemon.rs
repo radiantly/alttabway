@@ -1,10 +1,7 @@
 use std::{thread, time::Duration};
 
 use anyhow::bail;
-use smithay_client_toolkit::{
-    reexports::client::EventQueue,
-    shell::{WaylandSurface, wlr_layer::KeyboardInteractivity},
-};
+use smithay_client_toolkit::reexports::client::EventQueue;
 use tokio::{
     io::unix::AsyncFd,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -14,7 +11,7 @@ use tracing::{debug, trace, warn};
 use crate::{
     gui::Gui,
     wayland_client::{WaylandClient, WaylandClientEvent},
-    wgpu_wrapper::WgpuWrapper,
+    wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
 
 #[derive(Debug)]
@@ -26,7 +23,7 @@ pub enum MaybeWgpuWrapper {
 
 #[derive(Debug)]
 enum DaemonEvent {
-    WgpuInit(anyhow::Result<WgpuWrapper>),
+    WgpuSurface(WgpuWrapper, anyhow::Result<WgpuSurface>),
     Show,
     Hide,
 }
@@ -35,7 +32,8 @@ enum DaemonEvent {
 pub struct Daemon {
     height: u32,
     width: u32,
-    wgpu: MaybeWgpuWrapper,
+    wgpu: Option<WgpuWrapper>,
+    wgpu_surface: Option<WgpuSurface>,
     wayland_client: WaylandClient,
     wayland_client_q: EventQueue<WaylandClient>,
     wayland_client_rx: UnboundedReceiver<WaylandClientEvent>,
@@ -44,12 +42,12 @@ pub struct Daemon {
     command_rx: UnboundedReceiver<DaemonEvent>,
     gui: Gui,
     pending_repaint: bool,
-    visible: bool,
-    wl_buffer_attached: bool,
 }
 
 impl Daemon {
     pub async fn start() -> anyhow::Result<()> {
+        let wgpu_wrapper = WgpuWrapper::init().await?;
+
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -59,7 +57,8 @@ impl Daemon {
         let mut daemon = Self {
             height: 400,
             width: 800,
-            wgpu: MaybeWgpuWrapper::Uninitialized,
+            wgpu: Some(wgpu_wrapper),
+            wgpu_surface: None,
             wayland_client,
             wayland_client_q,
             wayland_client_rx,
@@ -67,9 +66,18 @@ impl Daemon {
             command_rx,
             gui: Default::default(),
             pending_repaint: false,
-            visible: false,
-            wl_buffer_attached: false,
         };
+
+        // TODO: for debugging, to be removed
+        let command_tx = daemon.command_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                thread::sleep(Duration::from_secs(3));
+                command_tx.send(DaemonEvent::Show).unwrap();
+                thread::sleep(Duration::from_secs(5));
+                command_tx.send(DaemonEvent::Hide).unwrap();
+            }
+        });
 
         Daemon::run_loop(&mut daemon).await
     }
@@ -100,39 +108,25 @@ impl Daemon {
 
                     match event {
                         WaylandClientEvent::LayerShellConfigure(configure) => {
+                            let (width, height) = configure.new_size;
                             // TODO: the compositor can send us (0, 0) indicating that we are
                             // free to pick any size. Handle this case.
-                            let (width, height) = configure.new_size;
+                            assert!(width != 0 && height != 0);
 
-                            match &mut self.wgpu {
-                                MaybeWgpuWrapper::Uninitialized => {
-                                    self.wgpu = MaybeWgpuWrapper::Initializing;
+                            if self.wayland_client.surfaces.is_none() || self.wgpu_surface.is_some() {
+                                continue;
+                            }
 
-                                    let command_tx = self.command_tx.clone();
-                                    let raw_handles = self.wayland_client.get_raw_handles()?;
 
-                                    tokio::spawn(async move {
-                                        let wgpu_wrapper = WgpuWrapper::init(raw_handles, 800, 400).await;
-                                        command_tx.send(DaemonEvent::WgpuInit(wgpu_wrapper)).unwrap();
-                                    });
-                                }
-                                MaybeWgpuWrapper::Initializing => warn!("configure called during wgpu initialization!"),
-                                MaybeWgpuWrapper::Initialized(wgpu) => {
-                                    assert!(width != 0 && height != 0);
+                            if let Some(mut wgpu) = self.wgpu.take() {
+                                let raw_handles = self.wayland_client.get_raw_handles()?;
+                                let command_tx = self.command_tx.clone();
 
-                                    wgpu.update_size(width, height);
 
-                                    // Important note.
-                                    // If at any point wl_surface.commit() is called without an attached buffer,
-                                    // the compositor may just send a configure event
-                                    // may result in an infinite loop if not careful
-
-                                    if !self.visible {
-                                        continue;
-                                    }
-
-                                    self.request_repaint()?
-                                }
+                                tokio::spawn(async move {
+                                    let wgpu_surface = wgpu.init_surface(raw_handles, width, height);
+                                    command_tx.send(DaemonEvent::WgpuSurface(wgpu, wgpu_surface)).unwrap();
+                                });
                             }
                         }
                         WaylandClientEvent::Egui(events) => {
@@ -150,25 +144,16 @@ impl Daemon {
                     trace!("received daemon event {:?}", event);
 
                     match event {
-                        DaemonEvent::WgpuInit(wgpu_wrapper_result) =>
-                            match wgpu_wrapper_result {
-                                Ok(wgpu_wrapper) => {
-                                    self.wgpu = MaybeWgpuWrapper::Initialized(wgpu_wrapper);
-                                    self.request_repaint()?;
-
-                                    // TODO: for debugging, to be removed
-                                    let command_tx = self.command_tx.clone();
-                                    tokio::spawn(async move {
-                                        loop {
-                                            thread::sleep(Duration::from_secs(3));
-                                            command_tx.send(DaemonEvent::Show).unwrap();
-                                            thread::sleep(Duration::from_secs(5));
-                                            command_tx.send(DaemonEvent::Hide).unwrap();
-                                        }
-                                    });
+                        DaemonEvent::WgpuSurface(wgpu, wgpu_surface_result) => {
+                            self.wgpu = Some(wgpu);
+                            match wgpu_surface_result {
+                                Ok(wgpu_surface) => {
+                                    self.wgpu_surface = Some(wgpu_surface);
+                                    self.paint()?;
                                 }
                                 Err(err) => bail!(err)
                             }
+                        }
                         DaemonEvent::Show => self.update_visibility(true)?,
                         DaemonEvent::Hide => self.update_visibility(false)?
                     }
@@ -178,68 +163,48 @@ impl Daemon {
     }
 
     fn request_repaint(&mut self) -> anyhow::Result<()> {
-        if !self.wl_buffer_attached {
-            return self.paint();
-        }
-
         if self.pending_repaint {
             return Ok(());
         }
         self.pending_repaint = true;
 
         trace!("repaint requested");
-        self.wayland_client.wl_surface.frame(
-            &self.wayland_client_q.handle(),
-            self.wayland_client.wl_surface.clone(),
-        );
-        self.wayland_client.wl_surface.commit();
+
+        if let Some(surfaces) = &self.wayland_client.surfaces {
+            surfaces
+                .wl_surface
+                .frame(&self.wayland_client_q.handle(), surfaces.wl_surface.clone());
+            surfaces.wl_surface.commit();
+        }
         Ok(())
     }
 
     fn update_visibility(&mut self, visible: bool) -> anyhow::Result<()> {
-        if self.visible == visible {
+        if self.wayland_client.surfaces.is_none() != visible {
             return Ok(());
         }
 
-        self.visible = visible;
-
         if visible {
-            self.wayland_client
-                .layer_surface
-                .set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-
-            // TODO: move sizing out of here
-            self.wayland_client
-                .layer_surface
-                .set_size(self.width, self.height);
+            self.wayland_client.create_surfaces(
+                &self.wayland_client_q.handle(),
+                self.width,
+                self.height,
+            )?;
         } else {
-            self.wayland_client
-                .layer_surface
-                .set_keyboard_interactivity(KeyboardInteractivity::None);
+            self.wgpu_surface.take();
+            self.wayland_client.surfaces.take();
         }
 
-        self.wayland_client.layer_surface.commit();
-
-        self.request_repaint()
+        Ok(())
     }
 
     fn paint(&mut self) -> anyhow::Result<()> {
         self.pending_repaint = false;
 
-        if self.visible {
-            if let MaybeWgpuWrapper::Initialized(wgpu) = &mut self.wgpu {
-                self.wl_buffer_attached = true;
-                return self.gui.paint(wgpu);
-            }
-
-            warn!("paint requested but wgpu has not yet finished initializing");
+        if let (Some(wgpu), Some(wgpu_surface)) = (&mut self.wgpu, &mut self.wgpu_surface) {
+            return self.gui.paint(wgpu, wgpu_surface);
         }
-
-        if self.wl_buffer_attached {
-            self.wl_buffer_attached = false;
-            self.wayland_client.wl_surface.attach(None, 0, 0);
-            self.wayland_client.wl_surface.commit();
-        }
+        warn!("paint requested but no surface?????");
         Ok(())
     }
 }

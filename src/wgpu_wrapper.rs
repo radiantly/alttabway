@@ -1,15 +1,16 @@
+use wgpu::{Adapter, Instance};
+
 use crate::wayland_client::RawHandles;
 use std::fmt;
 pub struct WgpuWrapper {
+    instance: Instance,
+    adapter: Adapter,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    pub surface: wgpu::Surface<'static>,
-    pub surface_config: wgpu::SurfaceConfiguration,
-    pub egui_renderer: egui_wgpu::Renderer,
 }
 
 impl WgpuWrapper {
-    pub async fn init(raw_handles: RawHandles, width: u32, height: u32) -> anyhow::Result<Self> {
+    pub async fn init() -> anyhow::Result<Self> {
         // Initialize wgpu
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -17,23 +18,11 @@ impl WgpuWrapper {
             ..Default::default()
         });
 
-        let RawHandles {
-            raw_display_handle,
-            raw_window_handle,
-        } = raw_handles;
-
-        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle,
-            raw_window_handle,
-        };
-
-        let surface = unsafe { instance.create_surface_unsafe(target)? };
-
         tracing::info!("requesting adapter...");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
+                compatible_surface: None, // Note: may possibly need to pass surface here. lazy init if this causes problems down the line
                 force_fallback_adapter: false,
             })
             .await?;
@@ -52,7 +41,36 @@ impl WgpuWrapper {
 
         tracing::info!("device aquired, continuing...");
 
-        let surface_caps = surface.get_capabilities(&adapter);
+        let wgpu_wrapper = Self {
+            instance,
+            adapter,
+            device,
+            queue,
+        };
+
+        tracing::info!("wgpu initialized successfully");
+        Ok(wgpu_wrapper)
+    }
+
+    pub fn init_surface(
+        &mut self,
+        raw_handles: RawHandles,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<WgpuSurface> {
+        let RawHandles {
+            raw_display_handle,
+            raw_window_handle,
+        } = raw_handles;
+
+        let target = wgpu::SurfaceTargetUnsafe::RawHandle {
+            raw_display_handle,
+            raw_window_handle,
+        };
+
+        let surface = unsafe { self.instance.create_surface_unsafe(target)? };
+
+        let surface_caps = surface.get_capabilities(&self.adapter);
         tracing::info!("caps: {:?}", surface_caps);
         let surface_format = surface_caps
             .formats
@@ -74,37 +92,12 @@ impl WgpuWrapper {
             desired_maximum_frame_latency: 2,
         };
 
-        surface.configure(&device, &config);
+        surface.configure(&self.device, &config);
 
-        // Initialize egui renderer
-        let egui_renderer = egui_wgpu::Renderer::new(
-            &device,
-            surface_format,
-            egui_wgpu::RendererOptions::default(),
-        );
-
-        let wgpu_wrapper = Self {
-            device,
-            queue,
+        Ok(WgpuSurface {
             surface,
             surface_config: config,
-            egui_renderer,
-        };
-
-        tracing::info!("wgpu initialized successfully");
-        Ok(wgpu_wrapper)
-    }
-
-    pub fn update_size(&mut self, width: u32, height: u32) {
-        if (self.surface_config.width, self.surface_config.height) == (width, height) {
-            return;
-        }
-
-        tracing::debug!("updating wgpu size to {}x{}!!", width, height);
-
-        self.surface_config.width = width;
-        self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
+        })
     }
 }
 
@@ -114,8 +107,12 @@ impl fmt::Debug for WgpuWrapper {
         f.debug_struct("WgpuWrapper")
             .field("device", &self.device)
             .field("queue", &self.queue)
-            .field("surface", &self.surface)
-            .field("surface_config", &self.surface_config)
             .finish()
     }
+}
+
+#[derive(Debug)]
+pub struct WgpuSurface {
+    pub surface: wgpu::Surface<'static>,
+    pub surface_config: wgpu::SurfaceConfiguration,
 }

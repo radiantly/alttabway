@@ -156,15 +156,20 @@ struct TopLevelWindow {
 }
 
 #[derive(Debug)]
+pub struct Surfaces {
+    pub layer_surface: LayerSurface,
+    pub wl_surface: WlSurface,
+}
+
+#[derive(Debug)]
 pub struct WaylandClient {
     registry_state: RegistryState,
     output_state: OutputState,
     compositor_state: CompositorState,
     layer_shell: LayerShell,
     seat_state: SeatState,
-    pub layer_surface: LayerSurface,
-    pub wl_surface: WlSurface,
     connection: Connection,
+    pub surfaces: Option<Surfaces>,
     wl_tx: UnboundedSender<WaylandClientEvent>,
     modifiers: Modifiers,
     toplevel_windows: Vec<TopLevelWindow>,
@@ -187,23 +192,7 @@ impl WaylandClient {
         let (globals, event_queue): (_, EventQueue<Self>) = registry_queue_init(&connection)?;
         let qh = event_queue.handle();
         let compositor_state = CompositorState::bind(&globals, &qh)?;
-        let wl_surface = compositor_state.create_surface(&qh);
         let layer_shell = LayerShell::bind(&globals, &qh)?;
-        let layer_surface = layer_shell.create_layer_surface(
-            &qh,
-            wl_surface.clone(),
-            Layer::Overlay,
-            Some(env!("CARGO_CRATE_NAME")),
-            None,
-        );
-
-        // Anchor to top and horizontally centered
-        layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT | Anchor::BOTTOM);
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer_surface.set_exclusive_zone(-1); // Don't reserve space
-        layer_surface.set_size(0, 0);
-        layer_surface.set_margin(0, 0, 0, 0);
-        layer_surface.commit();
 
         let (wl_tx, wl_rx) = mpsc::unbounded_channel();
 
@@ -220,8 +209,7 @@ impl WaylandClient {
             compositor_state,
             layer_shell,
             seat_state,
-            layer_surface,
-            wl_surface,
+            surfaces: None,
             wl_tx,
             modifiers: Default::default(),
             toplevel_windows: Vec::new(),
@@ -230,9 +218,44 @@ impl WaylandClient {
         Ok((wayland_app, event_queue, wl_rx))
     }
 
+    pub fn create_surfaces(
+        &mut self,
+        queue_handle: &QueueHandle<Self>,
+        width: u32,
+        height: u32,
+    ) -> anyhow::Result<()> {
+        let wl_surface = self.compositor_state.create_surface(queue_handle);
+
+        let layer_surface = self.layer_shell.create_layer_surface(
+            queue_handle,
+            wl_surface.clone(),
+            Layer::Overlay,
+            Some(env!("CARGO_CRATE_NAME")),
+            None,
+        );
+
+        // Anchor to top and horizontally centered
+        layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT | Anchor::BOTTOM);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer_surface.set_exclusive_zone(-1); // Don't reserve space
+        layer_surface.set_size(width, height);
+        layer_surface.set_margin(0, 0, 0, 0);
+        layer_surface.commit();
+
+        let surfaces = Surfaces {
+            wl_surface,
+            layer_surface,
+        };
+
+        self.surfaces = Some(surfaces);
+
+        Ok(())
+    }
+
     pub fn get_raw_handles(&self) -> anyhow::Result<RawHandles> {
+        let surfaces = self.surfaces.as_ref().context("surfaces is None")?;
         let display_ptr = self.connection.backend().display_ptr() as *mut c_void;
-        let surface_ptr = self.wl_surface.id().as_ptr() as *mut c_void;
+        let surface_ptr = surfaces.wl_surface.id().as_ptr() as *mut c_void;
 
         let raw_display_handle = {
             let display = NonNull::new(display_ptr).context("display_ptr is null")?;
