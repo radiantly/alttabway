@@ -1,11 +1,19 @@
 use std::{fmt::Debug, time::Duration};
 
-use egui::{Context, Event, FullOutput, RawInput, ViewportId};
+use egui::{ColorImage, Context, Event, FullOutput, RawInput, TextureHandle, ViewportId};
 
 use crate::wgpu_wrapper::{WgpuSurface, WgpuWrapper};
 
+pub struct Item {
+    pub title: String,
+    pub preview: TextureHandle,
+}
+
+impl Item {}
+
 pub struct Gui {
     egui_ctx: Context,
+    items: Vec<Item>,
     egui_renderer: Option<egui_wgpu::Renderer>,
     needs_repaint: bool,
 }
@@ -21,6 +29,7 @@ impl Debug for Gui {
 impl Default for Gui {
     fn default() -> Self {
         Self {
+            items: vec![],
             egui_ctx: Context::default(),
             egui_renderer: None,
             needs_repaint: true,
@@ -31,6 +40,20 @@ impl Default for Gui {
 impl Gui {
     pub fn new() -> Self {
         Gui::default()
+    }
+
+    pub fn add_item(&mut self, title: &str, preview_size: [usize; 2], preview_rgba: &[u8]) {
+        let image = ColorImage::from_rgba_unmultiplied(preview_size, preview_rgba);
+        let texture_handle = self.egui_ctx.load_texture(title, image, Default::default());
+        let item = Item {
+            title: title.into(),
+            preview: texture_handle,
+        };
+        self.items.push(item);
+    }
+
+    pub fn clear_items(&mut self) {
+        self.items.clear();
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -47,6 +70,19 @@ impl Gui {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.heading("Alt-Tab for Wayland");
                 ui.label("Hello from egui!");
+
+                ui.horizontal(|ui| {
+                    for item in self.items.iter() {
+                        ui.vertical(|ui| {
+                            ui.set_max_width(200.0);
+                            ui.set_max_height(100.0);
+
+                            ui.image((item.preview.id(), (200.0, 100.0).into()));
+
+                            ui.label(&item.title);
+                        });
+                    }
+                });
             });
         });
 

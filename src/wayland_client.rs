@@ -5,32 +5,38 @@ use raw_window_handle::{
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
-    delegate_registry, delegate_seat,
+    delegate_registry, delegate_seat, delegate_shm,
     output::{OutputHandler, OutputState},
     reexports::{
         client::{
-            self,
+            self, Connection, Dispatch, EventQueue, Proxy, QueueHandle,
             globals::registry_queue_init,
             protocol::{
                 wl_keyboard::WlKeyboard,
                 wl_output::{Transform, WlOutput},
                 wl_pointer::WlPointer,
                 wl_seat::WlSeat,
+                wl_shm::Format,
                 wl_surface::WlSurface,
             },
-            {Connection, Dispatch, EventQueue, Proxy, QueueHandle},
         },
-        protocols_wlr::foreign_toplevel::v1::client::{
-            zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
-            zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+        protocols_wlr::{
+            foreign_toplevel::v1::client::{
+                zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+                zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+            },
+            screencopy::v1::client::{
+                zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+                zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+            },
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
+        Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
-        {Capability, SeatHandler, SeatState},
     },
     shell::{
         WaylandSurface,
@@ -39,9 +45,15 @@ use smithay_client_toolkit::{
             LayerSurfaceConfigure,
         },
     },
+    shm::{
+        Shm, ShmHandler,
+        slot::{Buffer, SlotPool},
+    },
 };
-use std::{ffi::c_void, ptr::NonNull};
+use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tracing::debug;
+use wayland_backend::protocol::WEnum;
 
 #[derive(Debug)]
 pub enum WaylandClientEvent {
@@ -49,6 +61,7 @@ pub enum WaylandClientEvent {
     Egui(Vec<egui::Event>),
     Frame,
     Hide,
+    Activate,
 }
 
 impl WaylandClientEvent {
@@ -148,11 +161,69 @@ impl TryFrom<(KeyEvent, bool, bool, Modifiers)> for WaylandClientEvent {
     }
 }
 
-#[derive(Debug, Clone)]
-struct TopLevelWindow {
+#[derive(Debug)]
+pub struct ScreencopyFrameState {
+    window: ZwlrForeignToplevelHandleV1,
+
+    width: i32,
+    height: i32,
+    stride: i32,
+    format: Option<Format>,
+    buffer: Option<Buffer>,
+}
+
+impl ScreencopyFrameState {
+    fn new(window: ZwlrForeignToplevelHandleV1) -> Self {
+        Self {
+            window,
+
+            width: Default::default(),
+            height: Default::default(),
+            stride: Default::default(),
+            buffer: Default::default(),
+            format: Default::default(),
+        }
+    }
+
+    fn set_buffer_details(
+        &mut self,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: impl Into<Format>,
+    ) -> anyhow::Result<()> {
+        self.width = width.try_into()?;
+        self.height = height.try_into()?;
+        self.stride = stride.try_into()?;
+        self.format = format.into().into();
+        Ok(())
+    }
+
+    fn get_buffer_details(&self) -> Option<(i32, i32, i32, Format)> {
+        if let Some(format) = self.format
+            && self.width > 0
+            && self.height > 0
+        {
+            (self.width, self.height, self.stride, format).into()
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PreviewImage {
+    pub buffer: Buffer,
+    pub is_rgba: bool,
+}
+
+#[derive(Debug)]
+pub struct TopLevelWindow {
     handle: ZwlrForeignToplevelHandleV1,
-    title: String,
-    app_id: String,
+    outputs: Vec<WlOutput>,
+    pub title: String,
+    pub app_id: String,
+    pub preview: Option<PreviewImage>,
 }
 
 #[derive(Debug)]
@@ -168,11 +239,16 @@ pub struct WaylandClient {
     compositor_state: CompositorState,
     layer_shell: LayerShell,
     seat_state: SeatState,
+    shm: Shm,
     connection: Connection,
     pub surfaces: Option<Surfaces>,
     wl_tx: UnboundedSender<WaylandClientEvent>,
     modifiers: Modifiers,
-    toplevel_windows: Vec<TopLevelWindow>,
+    pub toplevel_windows: Vec<TopLevelWindow>,
+
+    screencopy_manager: ZwlrScreencopyManagerV1,
+    screencopy_frames: HashMap<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
+    pub screenshot_pool: SlotPool,
 }
 
 pub struct RawHandles {
@@ -202,6 +278,13 @@ impl WaylandClient {
         let _toplevel_manager =
             globals.bind::<ZwlrForeignToplevelManagerV1, _, _>(&qh, 3..=3, ())?;
 
+        // Bind screencopy manager
+        let screencopy_manager = globals.bind::<ZwlrScreencopyManagerV1, _, _>(&qh, 1..=3, ())?;
+
+        // Bind shared memory
+        let shm = Shm::bind(&globals, &qh)?;
+        let screenshot_pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
+
         let wayland_app = Self {
             registry_state: RegistryState::new(&globals),
             output_state: OutputState::new(&globals, &qh),
@@ -209,10 +292,14 @@ impl WaylandClient {
             compositor_state,
             layer_shell,
             seat_state,
+            shm,
             surfaces: None,
             wl_tx,
             modifiers: Default::default(),
             toplevel_windows: Vec::new(),
+            screencopy_manager,
+            screencopy_frames: HashMap::new(),
+            screenshot_pool,
         };
 
         Ok((wayland_app, event_queue, wl_rx))
@@ -273,6 +360,63 @@ impl WaylandClient {
             raw_display_handle,
             raw_window_handle,
         })
+    }
+
+    fn with_window(
+        &mut self,
+        handle: &ZwlrForeignToplevelHandleV1,
+        f: impl FnOnce(&mut TopLevelWindow),
+    ) {
+        let Some(toplevel_window) = self
+            .toplevel_windows
+            .iter_mut()
+            .find(|window| &window.handle == handle)
+        else {
+            return;
+        };
+
+        f(toplevel_window)
+    }
+
+    pub fn get_toplevel_windows(&mut self) -> &mut [TopLevelWindow] {
+        &mut self.toplevel_windows
+    }
+
+    pub fn capture_active_window_region(
+        &mut self,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        queue_handle: &QueueHandle<Self>,
+    ) -> anyhow::Result<()> {
+        let Some(active_window) = self.toplevel_windows.first_mut() else {
+            debug!("no active winwdow!");
+            return Ok(());
+        };
+
+        let Some(output) = active_window.outputs.first() else {
+            debug!("this window isn't visible????");
+            return Ok(());
+        };
+
+        let frame = self.screencopy_manager.capture_output_region(
+            0, // overlay_cursor: 1 means include cursor, 0 means don't include
+            output,
+            x,
+            y,
+            width,
+            height,
+            queue_handle,
+            (),
+        );
+
+        self.screencopy_frames.insert(
+            frame,
+            ScreencopyFrameState::new(active_window.handle.clone()),
+        );
+
+        Ok(())
     }
 }
 
@@ -493,6 +637,12 @@ impl PointerHandler for WaylandClient {
     }
 }
 
+impl ShmHandler for WaylandClient {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm
+    }
+}
+
 delegate_compositor!(WaylandClient);
 delegate_output!(WaylandClient);
 delegate_layer!(WaylandClient);
@@ -500,6 +650,124 @@ delegate_seat!(WaylandClient);
 delegate_keyboard!(WaylandClient);
 delegate_pointer!(WaylandClient);
 delegate_registry!(WaylandClient);
+delegate_shm!(WaylandClient);
+
+// Screencopy manager implementation
+impl Dispatch<ZwlrScreencopyManagerV1, ()> for WaylandClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrScreencopyManagerV1,
+        _event: <ZwlrScreencopyManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+// Screencopy frame implementation
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
+    fn event(
+        state: &mut Self,
+        frame: &ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use zwlr_screencopy_frame_v1::Event;
+
+        let Some(frame_state) = state.screencopy_frames.get_mut(frame) else {
+            return;
+        };
+
+        match event {
+            Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => {
+                tracing::debug!(
+                    "Screencopy buffer format: {:?}, size: {}x{}, stride: {}",
+                    format,
+                    width,
+                    height,
+                    stride
+                );
+
+                let WEnum::Value(format) = format else { return };
+
+                match format {
+                    Format::Argb8888 | Format::Xrgb8888 => (),
+                    _ => return,
+                };
+
+                let _ = frame_state.set_buffer_details(width, height, stride, format);
+            }
+            Event::BufferDone => {
+                let Some((width, height, stride, format)) = frame_state.get_buffer_details() else {
+                    state.screencopy_frames.remove(frame);
+                    return;
+                };
+
+                tracing::debug!("wsh {:?}:{:?}:{:?}", width, stride, height);
+
+                let Ok((buffer, _)) = state
+                    .screenshot_pool
+                    .create_buffer(width, height, stride, format)
+                else {
+                    tracing::error!("could not create buffer from pool!");
+                    state.screencopy_frames.remove(frame);
+                    return;
+                };
+
+                frame.copy(buffer.wl_buffer());
+                frame_state.buffer = buffer.into();
+            }
+            Event::Flags { flags: _ } => {
+                tracing::warn!("TODO: Handle screencopy flags");
+            }
+            Event::Ready {
+                tv_sec_hi: _,
+                tv_sec_lo: _,
+                tv_nsec: _,
+            } => {
+                tracing::debug!("Screencopy ready");
+                if let Some(ScreencopyFrameState {
+                    window,
+                    buffer: Some(buffer),
+                    ..
+                }) = state.screencopy_frames.remove(frame)
+                {
+                    state.with_window(&window, |window| {
+                        window.preview = PreviewImage {
+                            buffer,
+                            is_rgba: false,
+                        }
+                        .into()
+                    });
+                }
+            }
+            Event::Failed => {
+                tracing::warn!("Screencopy failed");
+                state.screencopy_frames.remove(frame);
+            }
+            Event::Damage {
+                x: _,
+                y: _,
+                width: _,
+                height: _,
+            } => {}
+            Event::LinuxDmabuf {
+                format: _,
+                width: _,
+                height: _,
+            } => {}
+            _ => unimplemented!(),
+        }
+    }
+}
 
 // Foreign toplevel manager implementation
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WaylandClient {
@@ -519,6 +787,8 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WaylandClient {
                     handle: toplevel,
                     title: String::new(),
                     app_id: String::new(),
+                    outputs: Default::default(),
+                    preview: None,
                 });
             }
             Event::Finished => {
@@ -550,27 +820,15 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
 
         match event {
             Event::Title { title } => {
-                if let Some(info) = state
-                    .toplevel_windows
-                    .iter_mut()
-                    .find(|window| window.handle == *handle)
-                {
-                    info.title = title;
-                }
+                state.with_window(handle, |window| window.title = title);
             }
             Event::AppId { app_id } => {
-                if let Some(info) = state
-                    .toplevel_windows
-                    .iter_mut()
-                    .find(|window| window.handle == *handle)
-                {
-                    info.app_id = app_id;
-                }
+                state.with_window(handle, |window| window.app_id = app_id);
             }
             Event::Closed => {
                 state
                     .toplevel_windows
-                    .retain(|window| window.handle != *handle);
+                    .retain(|window| &window.handle != handle);
             }
             Event::State {
                 state: window_state,
@@ -586,6 +844,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
                     {
                         let window = state.toplevel_windows.remove(pos);
                         state.toplevel_windows.insert(0, window);
+                        let _ = state.wl_tx.send(WaylandClientEvent::Activate);
                     }
                 }
             }
@@ -599,13 +858,16 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
                     .collect::<Vec<_>>()
                     .join(", ");
 
-                tracing::debug!("windows: {}", list);
+                tracing::trace!("windows: {}", list);
             }
 
             // windows have changed monitors
-            // we get this from the IPC, so I don't think we need to store it
-            Event::OutputEnter { output: _ } => (),
-            Event::OutputLeave { output: _ } => (),
+            Event::OutputEnter { output } => {
+                state.with_window(handle, |window| window.outputs.push(output));
+            }
+            Event::OutputLeave { output } => {
+                state.with_window(handle, |window| window.outputs.retain(|o| o != &output));
+            }
 
             // when the parent of the toplevel changes(?)
             Event::Parent { parent: _ } => (),

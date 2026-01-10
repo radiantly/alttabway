@@ -1,6 +1,6 @@
 use std::{thread, time::Duration};
 
-use anyhow::bail;
+use anyhow::{Context, bail};
 use smithay_client_toolkit::reexports::client::EventQueue;
 use tokio::{
     io::unix::AsyncFd,
@@ -9,8 +9,9 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
+    geometry_worker::{GeometryRequestId, GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
-    wayland_client::{WaylandClient, WaylandClientEvent},
+    wayland_client::{PreviewImage, WaylandClient, WaylandClientEvent},
     wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
 
@@ -42,10 +43,16 @@ pub struct Daemon {
     command_rx: UnboundedReceiver<DaemonEvent>,
     gui: Gui,
     pending_repaint: bool,
+
+    active_geometry_worker_request: Option<GeometryRequestId>,
+    geometry_worker: GeometryWorker,
+    geometry_worker_events: UnboundedReceiver<GeometryWorkerEvent>,
 }
 
 impl Daemon {
     pub async fn start() -> anyhow::Result<()> {
+        let (geometry_worker, geometry_worker_events) = GeometryWorker::new()?;
+
         let wgpu_wrapper = WgpuWrapper::init().await?;
 
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
@@ -66,6 +73,9 @@ impl Daemon {
             command_rx,
             gui: Default::default(),
             pending_repaint: false,
+            active_geometry_worker_request: None,
+            geometry_worker,
+            geometry_worker_events,
         };
 
         // TODO: for debugging, to be removed
@@ -109,14 +119,12 @@ impl Daemon {
                     match event {
                         WaylandClientEvent::LayerShellConfigure(configure) => {
                             let (width, height) = configure.new_size;
-                            // TODO: the compositor can send us (0, 0) indicating that we are
-                            // free to pick any size. Handle this case.
-                            assert!(width != 0 && height != 0);
+                            let width = if width == 0 { self.width } else { width };
+                            let height = if height == 0 { self.height } else { height };
 
                             if self.wayland_client.surfaces.is_none() || self.wgpu_surface.is_some() {
                                 continue;
                             }
-
 
                             if let Some(mut wgpu) = self.wgpu.take() {
                                 let raw_handles = self.wayland_client.get_raw_handles()?;
@@ -138,6 +146,15 @@ impl Daemon {
                         }
                         WaylandClientEvent::Frame => self.paint()?,
                         WaylandClientEvent::Hide => self.update_visibility(false)?,
+                        WaylandClientEvent::Activate => {
+
+                            if self.wayland_client.surfaces.is_some() {
+                                continue
+                            }
+
+                            let request_id = self.geometry_worker.request_active_window_geometry()?;
+                            self.active_geometry_worker_request = Some(request_id);
+                        }
                     }
                 },
                 Some(event) = self.command_rx.recv() => {
@@ -148,6 +165,8 @@ impl Daemon {
                             self.wgpu = Some(wgpu);
                             match wgpu_surface_result {
                                 Ok(wgpu_surface) => {
+                                    self.width = wgpu_surface.surface_config.width;
+                                    self.height = wgpu_surface.surface_config.height;
                                     self.wgpu_surface = Some(wgpu_surface);
                                     self.paint()?;
                                 }
@@ -156,6 +175,27 @@ impl Daemon {
                         }
                         DaemonEvent::Show => self.update_visibility(true)?,
                         DaemonEvent::Hide => self.update_visibility(false)?
+                    }
+                }
+                Some(event) = self.geometry_worker_events.recv() => {
+                    match event {
+                        GeometryWorkerEvent::ActiveWindow(request_id, geometry) => {
+                            let Some(active_request_id) = self.active_geometry_worker_request else {
+                                continue
+                            };
+
+                            if active_request_id != request_id {
+                                continue
+                            }
+
+                            let (x, y, width, height) = geometry;
+
+                            if width <= 0 || height <= 0 {
+                                continue
+                            }
+
+                            let _ = self.wayland_client.capture_active_window_region(x, y, width, height, &self.wayland_client_q.handle());
+                        }
                     }
                 }
             }
@@ -190,10 +230,54 @@ impl Daemon {
                 self.width,
                 self.height,
             )?;
+            self.update_gui_items()?;
         } else {
             self.wgpu_surface.take();
             self.wayland_client.surfaces.take();
         }
+
+        Ok(())
+    }
+
+    fn update_gui_items(&mut self) -> anyhow::Result<()> {
+        self.gui.clear_items();
+        for window in self.wayland_client.toplevel_windows.iter_mut() {
+            if let Some(PreviewImage { buffer, is_rgba }) = &mut window.preview {
+                warn!(
+                    "has buffer {:?}",
+                    &buffer
+                        .canvas(&mut self.wayland_client.screenshot_pool)
+                        .context("missing")?[0..4]
+                );
+
+                let canvas = buffer
+                    .canvas(&mut self.wayland_client.screenshot_pool)
+                    .context("missing canvas????")?;
+
+                let rgba = if *is_rgba {
+                    canvas
+                } else {
+                    *is_rgba = true;
+
+                    for chunk in canvas.chunks_exact_mut(4) {
+                        chunk.swap(0, 2);
+                    }
+                    canvas
+                };
+
+                let size = [(buffer.stride() / 4) as usize, buffer.height() as usize];
+
+                let display_title = if window.title.is_empty() {
+                    &window.app_id
+                } else {
+                    &window.title
+                };
+
+                self.gui.add_item(display_title, size, &rgba);
+            }
+        }
+
+        self.request_repaint()?;
 
         Ok(())
     }

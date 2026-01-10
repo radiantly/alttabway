@@ -1,4 +1,4 @@
-use wgpu::{Adapter, Instance};
+use wgpu::{Adapter, Instance, TextureFormat};
 
 use crate::wayland_client::RawHandles;
 use std::fmt;
@@ -71,15 +71,15 @@ impl WgpuWrapper {
         let surface = unsafe { self.instance.create_surface_unsafe(target)? };
 
         let surface_caps = surface.get_capabilities(&self.adapter);
-        tracing::info!("caps: {:?}", surface_caps);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
+        tracing::debug!("caps: {:?}", surface_caps);
 
-        tracing::info!("using format {:?}", surface_format);
+        let surface_format = if surface_caps.formats.contains(&TextureFormat::Rgba8Unorm) {
+            TextureFormat::Rgba8Unorm
+        } else {
+            surface_caps.formats[0]
+        };
+
+        tracing::debug!("using format {:?}", surface_format);
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
