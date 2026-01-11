@@ -1,5 +1,5 @@
 use crate::geometry_provider::GeometryProvider;
-use crate::{geometry_provider::Geometry, ipc::HyprlandIpc};
+use crate::{geometry_ipc::HyprlandIpc, geometry_provider::Geometry};
 use anyhow::{Result, bail};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -28,16 +28,19 @@ impl GeometryWorker {
         };
 
         let (request_tx, mut request_rx) = mpsc::unbounded_channel();
-        let (respons_tx, respons_rx) = mpsc::unbounded_channel();
+        let (response_tx, response_rx) = mpsc::unbounded_channel();
 
         tokio::spawn(async move {
             while let Some(event) = request_rx.recv().await {
                 match event {
                     GeometryWorkerRequestEvent::ActiveWindow(request_id) => {
-                        if let Ok(geometry) = provider.get_active_window_geometry() {
-                            let _ = respons_tx
-                                .send(GeometryWorkerEvent::ActiveWindow(request_id, geometry));
-                        };
+                        if let Ok(geometry) = provider.get_active_window_geometry()
+                            && response_tx
+                                .send(GeometryWorkerEvent::ActiveWindow(request_id, geometry))
+                                .is_err()
+                        {
+                            return;
+                        }
                     }
                 }
             }
@@ -48,7 +51,7 @@ impl GeometryWorker {
                 request_counter: 0,
                 request_tx,
             },
-            respons_rx,
+            response_rx,
         ))
     }
 

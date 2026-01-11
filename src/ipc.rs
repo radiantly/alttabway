@@ -1,66 +1,116 @@
-use crate::geometry_provider::{Geometry, GeometryProvider};
-use anyhow::Result;
-use std::env;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{env, fs, path::PathBuf};
 
-#[derive(Debug, serde::Deserialize)]
-struct HyprlandActiveWindow {
-    at: [i32; 2],
-    size: [i32; 2],
+use anyhow::{Context, Result, bail};
+use futures_util::{sink::SinkExt, stream::StreamExt};
+use rkyv::{Archive, Deserialize, Serialize, rancor};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use tracing::instrument;
+#[derive(Archive, Serialize, Deserialize, Debug)]
+pub enum IpcCommand {
+    Ping,
+    Show,
 }
 
-pub struct HyprlandIpc {
-    socket_path: PathBuf,
+#[derive(Archive, Serialize, Deserialize, Debug)]
+pub enum IpcCommandResponse {
+    Success,
+    Error(String),
 }
 
-impl GeometryProvider for HyprlandIpc {
-    fn new() -> Result<Self> {
-        let hyprland_instance_signature = env::var("HYPRLAND_INSTANCE_SIGNATURE")?;
+pub struct AlttabwayIpc {}
+
+impl AlttabwayIpc {
+    #[instrument]
+    fn get_socket_path() -> Result<PathBuf> {
         let xdg_runtime_dir = env::var("XDG_RUNTIME_DIR")?;
 
-        // TODO: sanitize what we read from the env variables
-        let socket_path = PathBuf::from(format!(
-            "{}/hypr/{}/.socket.sock",
-            xdg_runtime_dir, hyprland_instance_signature
-        ));
+        let mut socket_dir_path = PathBuf::from(format!("{}/alttabway", xdg_runtime_dir));
 
-        if !socket_path.exists() {
-            anyhow::bail!("Hyprland socket not found at {:?}", socket_path);
+        // create directory if it does not exist
+        let _ = fs::create_dir(&socket_dir_path);
+
+        socket_dir_path.push(".socket.sock");
+        Ok(socket_dir_path)
+    }
+
+    async fn handle_connection(stream: UnixStream, tx: UnboundedSender<IpcCommand>) -> Result<()> {
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+
+        while let Some(result) = framed.next().await {
+            let Ok(bytes) = result else { continue };
+
+            let response =
+                if let Ok(command) = rkyv::from_bytes::<IpcCommand, rancor::Error>(&bytes) {
+                    tx.send(command)?;
+                    IpcCommandResponse::Success
+                } else {
+                    IpcCommandResponse::Error(
+                        "Unrecognized IPC command. Try reloading the alttabway daemon?".into(),
+                    )
+                };
+
+            let response_bytes = rkyv::to_bytes::<rancor::Error>(&response)?;
+            framed.send(response_bytes.into_vec().into()).await?;
+        }
+        Ok(())
+    }
+
+    async fn listen(listener: UnixListener, tx: UnboundedSender<IpcCommand>) -> Result<()> {
+        loop {
+            let (stream, _) = listener.accept().await?;
+            let tx_copy = tx.clone();
+            tokio::spawn(Self::handle_connection(stream, tx_copy));
+        }
+    }
+
+    async fn send_socket_command(
+        socket_path: &PathBuf,
+        command: IpcCommand,
+    ) -> Result<IpcCommandResponse> {
+        let stream = UnixStream::connect(&socket_path).await?;
+
+        let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+
+        framed
+            .send(rkyv::to_bytes::<rancor::Error>(&command)?.into_vec().into())
+            .await?;
+
+        let bytes = framed
+            .next()
+            .await
+            .context("stream closed without response?")??;
+
+        let response = rkyv::from_bytes::<IpcCommandResponse, rancor::Error>(&bytes)?;
+        Ok(response)
+    }
+
+    #[instrument]
+    pub async fn start_server() -> Result<UnboundedReceiver<IpcCommand>> {
+        let socket_path = Self::get_socket_path()?;
+        tracing::info!("path {:?}", socket_path);
+
+        if let Ok(_) = Self::send_socket_command(&socket_path, IpcCommand::Ping).await {
+            bail!("Another instance is already running.");
         }
 
-        Ok(Self { socket_path })
+        let _ = fs::remove_file(&socket_path);
+
+        let listener = UnixListener::bind(&socket_path)?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        tokio::spawn(Self::listen(listener, tx));
+
+        Ok(rx)
     }
 
-    fn get_active_window_geometry(&mut self) -> Result<Geometry> {
-        let json_response = self.send_command("activewindow")?;
+    pub async fn send_command(command: IpcCommand) -> Result<IpcCommandResponse> {
+        let socket_path = Self::get_socket_path()?;
 
-        let window: HyprlandActiveWindow = serde_json::from_str(&json_response)?;
-
-        let x = window.at[0];
-        let y = window.at[1];
-        let width = window.size[0];
-        let height = window.size[1];
-
-        Ok((x, y, width, height))
-    }
-}
-
-impl HyprlandIpc {
-    fn send_command(&self, command: &str) -> Result<String> {
-        let mut stream = UnixStream::connect(&self.socket_path)?;
-
-        stream.set_read_timeout(Duration::from_secs(1).into())?;
-        stream.set_write_timeout(Duration::from_secs(1).into())?;
-
-        let request = format!("j/{}", command);
-        stream.write_all(request.as_bytes())?;
-
-        let mut response = String::new();
-        stream.read_to_string(&mut response)?;
-
-        Ok(response)
+        Self::send_socket_command(&socket_path, command).await
     }
 }

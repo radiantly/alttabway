@@ -1,5 +1,3 @@
-use std::{thread, time::Duration};
-
 use anyhow::{Context, bail};
 use smithay_client_toolkit::reexports::client::EventQueue;
 use tokio::{
@@ -11,6 +9,7 @@ use tracing::{debug, trace, warn};
 use crate::{
     geometry_worker::{GeometryRequestId, GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
+    ipc::{AlttabwayIpc, IpcCommand},
     wayland_client::{PreviewImage, WaylandClient, WaylandClientEvent},
     wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
@@ -25,8 +24,6 @@ pub enum MaybeWgpuWrapper {
 #[derive(Debug)]
 enum DaemonEvent {
     WgpuSurface(WgpuWrapper, anyhow::Result<WgpuSurface>),
-    Show,
-    Hide,
 }
 
 #[derive(Debug)]
@@ -47,10 +44,13 @@ pub struct Daemon {
     active_geometry_worker_request: Option<GeometryRequestId>,
     geometry_worker: GeometryWorker,
     geometry_worker_events: UnboundedReceiver<GeometryWorkerEvent>,
+
+    ipc_listener: UnboundedReceiver<IpcCommand>,
 }
 
 impl Daemon {
     pub async fn start() -> anyhow::Result<()> {
+        let ipc_listener = AlttabwayIpc::start_server().await?;
         let (geometry_worker, geometry_worker_events) = GeometryWorker::new()?;
 
         let wgpu_wrapper = WgpuWrapper::init().await?;
@@ -76,18 +76,8 @@ impl Daemon {
             active_geometry_worker_request: None,
             geometry_worker,
             geometry_worker_events,
+            ipc_listener,
         };
-
-        // TODO: for debugging, to be removed
-        let command_tx = daemon.command_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                thread::sleep(Duration::from_secs(3));
-                command_tx.send(DaemonEvent::Show).unwrap();
-                thread::sleep(Duration::from_secs(5));
-                command_tx.send(DaemonEvent::Hide).unwrap();
-            }
-        });
 
         Daemon::run_loop(&mut daemon).await
     }
@@ -173,8 +163,6 @@ impl Daemon {
                                 Err(err) => bail!(err)
                             }
                         }
-                        DaemonEvent::Show => self.update_visibility(true)?,
-                        DaemonEvent::Hide => self.update_visibility(false)?
                     }
                 }
                 Some(event) = self.geometry_worker_events.recv() => {
@@ -196,6 +184,12 @@ impl Daemon {
 
                             let _ = self.wayland_client.capture_active_window_region(x, y, width, height, &self.wayland_client_q.handle());
                         }
+                    }
+                }
+                Some(event) = self.ipc_listener.recv() => {
+                    match event {
+                        IpcCommand::Ping => (),
+                        IpcCommand::Show => self.update_visibility(true)?
                     }
                 }
             }

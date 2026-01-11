@@ -1,6 +1,8 @@
-use alttabway::daemon::Daemon;
+use alttabway::{
+    daemon::Daemon,
+    ipc::{AlttabwayIpc, IpcCommand},
+};
 use clap::{Parser, Subcommand};
-use tracing::info;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -12,7 +14,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Start the alttabway daemon
     Daemon,
+
+    /// Show the alt-tab window (requires daemon to be running)
+    Show,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -24,10 +30,17 @@ async fn main() {
     // matches just as you would the top level cmd
     match &cli.command {
         Commands::Daemon => {
-            info!("requesting daemon start");
+            tracing::debug!("requesting daemon start");
             if let Err(err) = Daemon::start().await {
-                tracing::error!("{:?}", err);
+                tracing::info!("Exiting: {}", err);
             }
         }
+        Commands::Show => match AlttabwayIpc::send_command(IpcCommand::Show).await {
+            Ok(response) => tracing::info!("{:?}", response),
+            Err(err) => tracing::warn!(
+                "Please check if the alttabway daemon is running. Error: {}",
+                err
+            ),
+        },
     }
 }
