@@ -9,6 +9,7 @@ enum GeometryWorkerRequestEvent {
     ActiveWindow(GeometryRequestId),
 }
 
+#[derive(Debug)]
 pub enum GeometryWorkerEvent {
     ActiveWindow(GeometryRequestId, Geometry),
 }

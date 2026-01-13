@@ -1,4 +1,4 @@
-use std::{fmt::Debug, time::Duration};
+use std::{fmt::Debug, iter, time::Duration};
 
 use egui::{ColorImage, Context, Event, FullOutput, RawInput, TextureHandle, ViewportId};
 
@@ -147,9 +147,13 @@ impl Gui {
             )
         });
 
+        tracing::trace!("Updating textures");
+
         for (id, image_delta) in &full_output.textures_delta.set {
             egui_renderer.update_texture(&wgpu.device, &wgpu.queue, *id, image_delta);
         }
+
+        tracing::trace!("Updating buffers");
 
         egui_renderer.update_buffers(
             &wgpu.device,
@@ -160,6 +164,8 @@ impl Gui {
         );
 
         {
+            tracing::trace!("Beginning render pass");
+
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -192,7 +198,7 @@ impl Gui {
             egui_renderer.free_texture(id);
         }
 
-        wgpu.queue.submit(std::iter::once(encoder.finish()));
+        wgpu.queue.submit(iter::once(encoder.finish()));
         output.present();
         self.needs_repaint = false;
 

@@ -13,6 +13,7 @@ use tracing::instrument;
 pub enum IpcCommand {
     Ping,
     Show,
+    Hide,
 }
 
 #[derive(Archive, Serialize, Deserialize, Debug)]

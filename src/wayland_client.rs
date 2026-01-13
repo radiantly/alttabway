@@ -52,16 +52,17 @@ use smithay_client_toolkit::{
 };
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tracing::debug;
+use tracing::{debug, warn};
 use wayland_backend::protocol::WEnum;
 
 #[derive(Debug)]
 pub enum WaylandClientEvent {
     LayerShellConfigure(LayerSurfaceConfigure),
     Egui(Vec<egui::Event>),
-    Frame,
-    Hide,
-    Activate,
+    ModifierChange,
+    Frame,    // TODO: To be renamed
+    Hide,     // TODO: To be removed
+    Activate, // TODO: To be renamed
 }
 
 impl WaylandClientEvent {
@@ -283,6 +284,8 @@ impl WaylandClient {
 
         // Bind shared memory
         let shm = Shm::bind(&globals, &qh)?;
+
+        // TODO: dynamic resizing
         let screenshot_pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
 
         let wayland_app = Self {
@@ -305,6 +308,10 @@ impl WaylandClient {
         Ok((wayland_app, event_queue, wl_rx))
     }
 
+    pub fn get_modifiers(&self) -> &Modifiers {
+        &self.modifiers
+    }
+
     pub fn create_surfaces(
         &mut self,
         queue_handle: &QueueHandle<Self>,
@@ -323,7 +330,7 @@ impl WaylandClient {
 
         // Anchor to top and horizontally centered
         layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT | Anchor::BOTTOM);
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         layer_surface.set_exclusive_zone(-1); // Don't reserve space
         layer_surface.set_size(width, height);
         layer_surface.set_margin(0, 0, 0, 0);
@@ -400,11 +407,26 @@ impl WaylandClient {
             return Ok(());
         };
 
+        // TODO: different compositors might have different coord transforms. deal with it
+
+        // Get output position to convert global coordinates to output-relative coordinates
+        let Some(output_info) = self.output_state.info(output) else {
+            debug!("could not get output info");
+            return Ok(());
+        };
+
+        // Use logical_position if available, otherwise fall back to location
+        let (output_x, output_y) = output_info.logical_position.unwrap_or(output_info.location);
+
+        // Convert global coordinates to output-relative coordinates
+        let relative_x = x - output_x;
+        let relative_y = y - output_y;
+
         let frame = self.screencopy_manager.capture_output_region(
             0, // overlay_cursor: 1 means include cursor, 0 means don't include
             output,
-            x,
-            y,
+            relative_x,
+            relative_y,
             width,
             height,
             queue_handle,
@@ -607,6 +629,7 @@ impl KeyboardHandler for WaylandClient {
         _layout: u32,
     ) {
         self.modifiers = modifiers;
+        self.wl_tx.send(WaylandClientEvent::ModifierChange).unwrap();
     }
 
     fn repeat_key(
@@ -725,21 +748,38 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 frame.copy(buffer.wl_buffer());
                 frame_state.buffer = buffer.into();
             }
-            Event::Flags { flags: _ } => {
-                tracing::warn!("TODO: Handle screencopy flags");
+            Event::Flags { flags } => {
+                use zwlr_screencopy_frame_v1::Flags;
+
+                match flags {
+                    WEnum::Value(flags) => {
+                        if flags.contains(Flags::YInvert) {
+                            warn!("TODO: Handle screencopy YInvert");
+                        }
+                    }
+                    WEnum::Unknown(flag) => warn!("Unknown screencopy flag: {}", flag),
+                };
             }
-            Event::Ready {
-                tv_sec_hi: _,
-                tv_sec_lo: _,
-                tv_nsec: _,
-            } => {
-                tracing::debug!("Screencopy ready");
+            Event::Ready { .. } => {
+                tracing::warn!(
+                    "ready buffer {:?}",
+                    &frame_state
+                        .buffer
+                        .as_ref()
+                        .unwrap()
+                        .canvas(&mut state.screenshot_pool)
+                        .context("missing")
+                        .unwrap()[0..4]
+                );
+
                 if let Some(ScreencopyFrameState {
                     window,
                     buffer: Some(buffer),
                     ..
                 }) = state.screencopy_frames.remove(frame)
                 {
+                    tracing::debug!("screencopy is ready AND AVAILABLE");
+
                     state.with_window(&window, |window| {
                         window.preview = PreviewImage {
                             buffer,
@@ -753,17 +793,12 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 tracing::warn!("Screencopy failed");
                 state.screencopy_frames.remove(frame);
             }
-            Event::Damage {
-                x: _,
-                y: _,
-                width: _,
-                height: _,
-            } => {}
-            Event::LinuxDmabuf {
-                format: _,
-                width: _,
-                height: _,
-            } => {}
+
+            // currently unused because we never call frame.copy_with_damage
+            Event::Damage { .. } => {}
+
+            // LinuxDmabuf is a possible perf enhancement that can be explored in the future
+            Event::LinuxDmabuf { .. } => {}
             _ => unimplemented!(),
         }
     }
@@ -863,10 +898,16 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
 
             // windows have changed monitors
             Event::OutputEnter { output } => {
-                state.with_window(handle, |window| window.outputs.push(output));
+                state.with_window(handle, |window| {
+                    tracing::trace!("window {:?} has entered output.", window.app_id);
+                    window.outputs.push(output)
+                });
             }
             Event::OutputLeave { output } => {
-                state.with_window(handle, |window| window.outputs.retain(|o| o != &output));
+                state.with_window(handle, |window| {
+                    tracing::trace!("window {:?} has left output.", window.app_id);
+                    window.outputs.retain(|o| o != &output)
+                });
             }
 
             // when the parent of the toplevel changes(?)

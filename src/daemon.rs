@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::{Context, bail};
 use smithay_client_toolkit::reexports::client::EventQueue;
 use tokio::{
@@ -10,6 +12,7 @@ use crate::{
     geometry_worker::{GeometryRequestId, GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
     ipc::{AlttabwayIpc, IpcCommand},
+    timer::Timer,
     wayland_client::{PreviewImage, WaylandClient, WaylandClientEvent},
     wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
@@ -46,6 +49,9 @@ pub struct Daemon {
     geometry_worker_events: UnboundedReceiver<GeometryWorkerEvent>,
 
     ipc_listener: UnboundedReceiver<IpcCommand>,
+    visible: bool,
+
+    screenshot_timer: Timer,
 }
 
 impl Daemon {
@@ -77,6 +83,8 @@ impl Daemon {
             geometry_worker,
             geometry_worker_events,
             ipc_listener,
+            visible: false,
+            screenshot_timer: Timer::new(Duration::from_secs(5)),
         };
 
         Daemon::run_loop(&mut daemon).await
@@ -103,7 +111,8 @@ impl Daemon {
                     self.wayland_client_q
                         .dispatch_pending(&mut self.wayland_client)?;
                 },
-                Some(event) = self.wayland_client_rx.recv() => {
+                result = self.wayland_client_rx.recv() => {
+                    let event = result.context("wayland client has crashed")?;
                     trace!("received wayland client event {:?}", event);
 
                     match event {
@@ -112,7 +121,7 @@ impl Daemon {
                             let width = if width == 0 { self.width } else { width };
                             let height = if height == 0 { self.height } else { height };
 
-                            if self.wayland_client.surfaces.is_none() || self.wgpu_surface.is_some() {
+                            if !self.visible || self.wayland_client.surfaces.is_none() || self.wgpu_surface.is_some() {
                                 continue;
                             }
 
@@ -138,12 +147,17 @@ impl Daemon {
                         WaylandClientEvent::Hide => self.update_visibility(false)?,
                         WaylandClientEvent::Activate => {
 
-                            if self.wayland_client.surfaces.is_some() {
+                            if self.visible && self.wayland_client.surfaces.is_some() {
                                 continue
                             }
 
-                            let request_id = self.geometry_worker.request_active_window_geometry()?;
-                            self.active_geometry_worker_request = Some(request_id);
+                            self.screenshot_timer.ping_after(Duration::from_secs(1)).await?;
+                        }
+                        WaylandClientEvent::ModifierChange => {
+                            if !self.wayland_client.get_modifiers().alt {
+                                // TODO: activate window
+                                self.update_visibility(false)?;
+                            }
                         }
                     }
                 },
@@ -152,20 +166,28 @@ impl Daemon {
 
                     match event {
                         DaemonEvent::WgpuSurface(wgpu, wgpu_surface_result) => {
-                            self.wgpu = Some(wgpu);
+                            self.wgpu = wgpu.into();
+
                             match wgpu_surface_result {
                                 Ok(wgpu_surface) => {
                                     self.width = wgpu_surface.surface_config.width;
                                     self.height = wgpu_surface.surface_config.height;
                                     self.wgpu_surface = Some(wgpu_surface);
-                                    self.paint()?;
+                                    if self.visible {
+                                        self.paint()?;
+                                    } else {
+                                        self.update_visibility(false)?;
+                                    }
                                 }
                                 Err(err) => bail!(err)
                             }
                         }
                     }
                 }
-                Some(event) = self.geometry_worker_events.recv() => {
+                result = self.geometry_worker_events.recv() => {
+                    let event = result.context("geometry worker has crashed")?;
+                    tracing::debug!("geometry worker event: {:?}", event);
+
                     match event {
                         GeometryWorkerEvent::ActiveWindow(request_id, geometry) => {
                             let Some(active_request_id) = self.active_geometry_worker_request else {
@@ -186,11 +208,21 @@ impl Daemon {
                         }
                     }
                 }
-                Some(event) = self.ipc_listener.recv() => {
+                result = self.ipc_listener.recv() => {
+                    let event = result.context("ipc server has crashed")?;
+                    tracing::debug!("ipc event: {:?}", event);
+
                     match event {
                         IpcCommand::Ping => (),
-                        IpcCommand::Show => self.update_visibility(true)?
+                        IpcCommand::Show => self.update_visibility(true)?,
+                        IpcCommand::Hide => self.update_visibility(false)?,
                     }
+                }
+                result = self.screenshot_timer.wait() => {
+                    result?;
+
+                    let request_id = self.geometry_worker.request_active_window_geometry()?;
+                    self.active_geometry_worker_request = Some(request_id);
                 }
             }
         }
@@ -214,11 +246,14 @@ impl Daemon {
     }
 
     fn update_visibility(&mut self, visible: bool) -> anyhow::Result<()> {
-        if self.wayland_client.surfaces.is_none() != visible {
-            return Ok(());
-        }
+        self.visible = visible;
 
         if visible {
+            // already visible
+            if self.wayland_client.surfaces.is_some() {
+                return Ok(());
+            }
+
             self.wayland_client.create_surfaces(
                 &self.wayland_client_q.handle(),
                 self.width,
@@ -226,6 +261,10 @@ impl Daemon {
             )?;
             self.update_gui_items()?;
         } else {
+            // we can't drop surfaces right now
+            if self.wgpu.is_none() {
+                return Ok(());
+            }
             self.wgpu_surface.take();
             self.wayland_client.surfaces.take();
         }
