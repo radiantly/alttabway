@@ -1,41 +1,36 @@
-use std::{cmp, fmt::Debug, iter, mem, time::Duration};
+use std::{cmp, fmt::Debug, iter, time::Duration};
 
 use egui::{ColorImage, Context, Event, FullOutput, RawInput, TextureHandle, ViewportId};
 
 use crate::wgpu_wrapper::{WgpuSurface, WgpuWrapper};
-enum ItemPreview {
-    None,
-    ColorImage(ColorImage),
-    TextureHandle(TextureHandle),
-}
 
+#[derive(Default)]
 pub struct Item {
     id: u32,
     title: String,
     app_id: String,
-    preview: ItemPreview,
+    preview: Option<TextureHandle>,
 }
 
 impl Item {
     fn new(id: u32) -> Self {
         Self {
             id,
-            title: String::new(),
-            app_id: String::new(),
-            preview: ItemPreview::None,
+            ..Default::default()
         }
     }
+}
 
-    fn get_image(&mut self) -> Option<ColorImage> {
-        let preview = mem::replace(&mut self.preview, ItemPreview::None);
+trait ItemVecExt {
+    fn with_id(&mut self, id: u32, f: impl FnOnce(&mut Item));
+}
 
-        match preview {
-            ItemPreview::ColorImage(color_image) => color_image.into(),
-            preview => {
-                self.preview = preview;
-                None
-            }
-        }
+impl ItemVecExt for Vec<Item> {
+    fn with_id(&mut self, id: u32, f: impl FnOnce(&mut Item)) {
+        let Some(item) = self.iter_mut().find(|item| item.id == id) else {
+            return;
+        };
+        f(item).into()
     }
 }
 
@@ -73,23 +68,15 @@ impl Gui {
         Gui::default()
     }
 
-    fn with_item(&mut self, id: u32, f: impl FnOnce(&mut Item)) {
-        let Some(item) = self.items.iter_mut().find(|item| item.id == id) else {
-            return;
-        };
-
-        f(item)
-    }
-
     pub fn add_item(&mut self, id: u32) {
         self.items.push(Item::new(id));
     }
 
     pub fn update_item_title(&mut self, id: u32, new_title: String) {
-        self.with_item(id, |item| item.title = new_title);
+        self.items.with_id(id, |item| item.title = new_title);
     }
     pub fn update_item_app_id(&mut self, id: u32, new_app_id: String) {
-        self.with_item(id, |item| item.app_id = new_app_id);
+        self.items.with_id(id, |item| item.app_id = new_app_id);
     }
     pub fn signal_item_activation(&mut self, id: u32) {
         if let Some(pos) = self.items.iter().position(|item| item.id == id) {
@@ -103,10 +90,23 @@ impl Gui {
         self.items.first().map(|item| item.id)
     }
     pub fn update_item_preview(&mut self, id: u32, preview: (&[u8], usize)) {
-        self.with_item(id, |item| {
+        self.items.with_id(id, |item| {
             let (rgba, stride) = preview;
             let size = [stride / 4, rgba.len() / stride];
-            item.preview = ItemPreview::ColorImage(ColorImage::from_rgba_unmultiplied(size, rgba))
+            let color_image = ColorImage::from_rgba_unmultiplied(size, rgba);
+
+            if let Some(texture_handle) = &mut item.preview {
+                texture_handle.set(color_image, Default::default());
+            } else {
+                item.preview = self
+                    .egui_ctx
+                    .load_texture(
+                        format!("preview-{}-{}", item.id, item.app_id),
+                        color_image,
+                        Default::default(),
+                    )
+                    .into();
+            };
         });
     }
 
@@ -156,38 +156,29 @@ impl Gui {
             egui::CentralPanel::default()
                 .frame(panel_frame)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        for (index, item) in self.items.iter_mut().enumerate() {
-                            egui::Frame::new()
-                                .stroke(if index == self.selected_item {
-                                    egui::Stroke::new(2.0, egui::Color32::WHITE)
-                                } else {
-                                    egui::Stroke::new(2.0, egui::Color32::TRANSPARENT)
-                                })
-                                .inner_margin(4.0)
-                                .show(ui, |ui| {
-                                    ui.set_max_width(200.0);
-                                    ui.set_max_height(100.0);
-                                    ui.vertical(|ui| {
-                                        ui.label(&item.title);
+                    ui.vertical_centered(|ui| {
+                        ui.horizontal(|ui| {
+                            for (index, item) in self.items.iter_mut().enumerate() {
+                                egui::Frame::new()
+                                    .stroke(if index == self.selected_item {
+                                        egui::Stroke::new(2.0, egui::Color32::WHITE)
+                                    } else {
+                                        egui::Stroke::new(2.0, egui::Color32::TRANSPARENT)
+                                    })
+                                    .inner_margin(4.0)
+                                    .show(ui, |ui| {
+                                        ui.set_max_width(200.0);
+                                        ui.set_max_height(100.0);
+                                        ui.vertical(|ui| {
+                                            ui.label(&item.title);
 
-                                        if let Some(color_image) = item.get_image() {
-                                            let texture_handle = self.egui_ctx.load_texture(
-                                                &item.app_id,
-                                                color_image,
-                                                Default::default(),
-                                            );
-
-                                            item.preview =
-                                                ItemPreview::TextureHandle(texture_handle);
-                                        }
-
-                                        if let ItemPreview::TextureHandle(handle) = &item.preview {
-                                            ui.image((handle.id(), (200.0, 100.0).into()));
-                                        }
+                                            if let Some(handle) = &item.preview {
+                                                ui.image((handle.id(), (200.0, 100.0).into()));
+                                            }
+                                        });
                                     });
-                                });
-                        }
+                            }
+                        });
                     });
                 });
         });
