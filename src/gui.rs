@@ -148,40 +148,48 @@ impl Gui {
 
     fn build_output(&mut self, raw_input: RawInput) -> FullOutput {
         let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    for (index, item) in self.items.iter_mut().enumerate() {
-                        egui::Frame::new()
-                            .stroke(if index == self.selected_item {
-                                egui::Stroke::new(2.0, egui::Color32::WHITE)
-                            } else {
-                                egui::Stroke::new(2.0, egui::Color32::TRANSPARENT)
-                            })
-                            .inner_margin(4.0)
-                            .show(ui, |ui| {
-                                ui.set_max_width(200.0);
-                                ui.set_max_height(100.0);
-                                ui.vertical(|ui| {
-                                    ui.label(&item.title);
+            let panel_frame = egui::Frame::new()
+                .fill(egui::Color32::from_rgba_unmultiplied(25, 25, 25, 230))
+                .corner_radius(10.0)
+                .inner_margin(8.0);
 
-                                    if let Some(color_image) = item.get_image() {
-                                        let texture_handle = self.egui_ctx.load_texture(
-                                            &item.app_id,
-                                            color_image,
-                                            Default::default(),
-                                        );
+            egui::CentralPanel::default()
+                .frame(panel_frame)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        for (index, item) in self.items.iter_mut().enumerate() {
+                            egui::Frame::new()
+                                .stroke(if index == self.selected_item {
+                                    egui::Stroke::new(2.0, egui::Color32::WHITE)
+                                } else {
+                                    egui::Stroke::new(2.0, egui::Color32::TRANSPARENT)
+                                })
+                                .inner_margin(4.0)
+                                .show(ui, |ui| {
+                                    ui.set_max_width(200.0);
+                                    ui.set_max_height(100.0);
+                                    ui.vertical(|ui| {
+                                        ui.label(&item.title);
 
-                                        item.preview = ItemPreview::TextureHandle(texture_handle);
-                                    }
+                                        if let Some(color_image) = item.get_image() {
+                                            let texture_handle = self.egui_ctx.load_texture(
+                                                &item.app_id,
+                                                color_image,
+                                                Default::default(),
+                                            );
 
-                                    if let ItemPreview::TextureHandle(handle) = &item.preview {
-                                        ui.image((handle.id(), (200.0, 100.0).into()));
-                                    }
+                                            item.preview =
+                                                ItemPreview::TextureHandle(texture_handle);
+                                        }
+
+                                        if let ItemPreview::TextureHandle(handle) = &item.preview {
+                                            ui.image((handle.id(), (200.0, 100.0).into()));
+                                        }
+                                    });
                                 });
-                            });
-                    }
+                        }
+                    });
                 });
-            });
         });
 
         self.needs_repaint = self.needs_repaint
@@ -201,7 +209,7 @@ impl Gui {
     }
 
     pub fn paint(&mut self, wgpu: &mut WgpuWrapper, wsurf: &mut WgpuSurface) -> anyhow::Result<()> {
-        tracing::trace!("render() called");
+        let _span = tracing::trace_span!("Paint").entered();
 
         let output = wsurf.surface.get_current_texture()?;
 
@@ -271,10 +279,10 @@ impl Gui {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.1,
-                            g: 0.1,
-                            b: 0.1,
-                            a: 0.9,
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 0.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -292,12 +300,18 @@ impl Gui {
             );
         }
 
+        tracing::trace!("Freeing textures");
         for id in &full_output.textures_delta.free {
             egui_renderer.free_texture(id);
         }
 
+        tracing::trace!("Submitting queue");
         wgpu.queue.submit(iter::once(encoder.finish()));
+
+        tracing::trace!("Presenting output");
         output.present();
+
+        tracing::trace!("Completed");
         self.needs_repaint = false;
 
         Ok(())

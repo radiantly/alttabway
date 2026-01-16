@@ -73,13 +73,20 @@ impl WgpuWrapper {
         let surface_caps = surface.get_capabilities(&self.adapter);
         tracing::debug!("caps: {:?}", surface_caps);
 
-        let surface_format = if surface_caps.formats.contains(&TextureFormat::Rgba8Unorm) {
-            TextureFormat::Rgba8Unorm
-        } else {
-            surface_caps.formats[0]
+        let surface_format = match surface_caps.formats.contains(&TextureFormat::Rgba8Unorm) {
+            true => TextureFormat::Rgba8Unorm,
+            false => surface_caps.formats[0],
         };
 
-        tracing::debug!("using format {:?}", surface_format);
+        let alpha_mode = match surface_caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            true => wgpu::CompositeAlphaMode::PreMultiplied,
+            false => surface_caps.alpha_modes[0],
+        };
+
+        tracing::debug!("using format {:?} {:?}", surface_format, alpha_mode);
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -87,7 +94,7 @@ impl WgpuWrapper {
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };

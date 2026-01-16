@@ -9,7 +9,7 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     reexports::{
         client::{
-            self, Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+            self, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
             globals::registry_queue_init,
             protocol::{
                 wl_keyboard::WlKeyboard,
@@ -53,7 +53,6 @@ use smithay_client_toolkit::{
 use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
-use wayland_backend::protocol::WEnum;
 
 #[derive(Debug)]
 pub enum WaylandClientEvent {
