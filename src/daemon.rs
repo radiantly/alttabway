@@ -9,13 +9,15 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
-    geometry_worker::{GeometryRequestId, GeometryWorker, GeometryWorkerEvent},
+    geometry_worker::{GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
     ipc::{AlttabwayIpc, IpcCommand},
     timer::Timer,
-    wayland_client::{PreviewImage, WaylandClient, WaylandClientEvent},
+    wayland_client::{WaylandClient, WaylandClientEvent},
     wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
+
+use fast_image_resize::{PixelType, Resizer, images::Image};
 
 #[derive(Debug)]
 pub enum MaybeWgpuWrapper {
@@ -44,9 +46,7 @@ pub struct Daemon {
     gui: Gui,
     pending_repaint: bool,
 
-    active_geometry_worker_request: Option<GeometryRequestId>,
-    geometry_worker: GeometryWorker,
-    geometry_worker_events: UnboundedReceiver<GeometryWorkerEvent>,
+    geometry_worker: GeometryWorker<u32>,
 
     ipc_listener: UnboundedReceiver<IpcCommand>,
     visible: bool,
@@ -57,7 +57,7 @@ pub struct Daemon {
 impl Daemon {
     pub async fn start() -> anyhow::Result<()> {
         let ipc_listener = AlttabwayIpc::start_server().await?;
-        let (geometry_worker, geometry_worker_events) = GeometryWorker::new()?;
+        let geometry_worker = GeometryWorker::new()?;
 
         let wgpu_wrapper = WgpuWrapper::init().await?;
 
@@ -79,9 +79,7 @@ impl Daemon {
             command_rx,
             gui: Default::default(),
             pending_repaint: false,
-            active_geometry_worker_request: None,
             geometry_worker,
-            geometry_worker_events,
             ipc_listener,
             visible: false,
             screenshot_timer: Timer::new(Duration::from_secs(5)),
@@ -143,21 +141,55 @@ impl Daemon {
                                 self.request_repaint()?
                             }
                         }
-                        WaylandClientEvent::Frame => self.paint()?,
-                        WaylandClientEvent::Hide => self.update_visibility(false)?,
-                        WaylandClientEvent::Activate => {
+                        WaylandClientEvent::PaintRequest => self.paint()?,
+                        WaylandClientEvent::ModifierChange => {
+                            if !self.wayland_client.get_modifiers().alt {
 
+                                if let Some(window_id) = self.gui.get_selected_item_id() {
+                                    self.wayland_client.activate_window(window_id);
+                                }
+
+                                self.update_visibility(false)?;
+                            }
+                        }
+                        WaylandClientEvent::TopLevelAdded(id) => self.gui.add_item(id),
+                        WaylandClientEvent::TopLevelActivated(id) => {
+                            self.gui.signal_item_activation(id);
+
+                            // take screenshot for preview
                             if self.visible && self.wayland_client.surfaces.is_some() {
                                 continue
                             }
 
                             self.screenshot_timer.ping_after(Duration::from_secs(1)).await?;
                         }
-                        WaylandClientEvent::ModifierChange => {
-                            if !self.wayland_client.get_modifiers().alt {
-                                // TODO: activate window
-                                self.update_visibility(false)?;
-                            }
+                        WaylandClientEvent::TopLevelTitleUpdate(id, new_title) => self.gui.update_item_title(id, new_title),
+                        WaylandClientEvent::TopLevelAppIdUpdate(id, new_app_id) => self.gui.update_item_title(id, new_app_id),
+                        WaylandClientEvent::TopLevelRemoved(id) => self.gui.remove_item(id),
+                        WaylandClientEvent::ScreencopyDone(id, buffer) => {
+                            // TODO: Resizing takes time, especially on slower computers
+                            let _span = tracing::trace_span!("Resize", id=id).entered();
+                            tracing::trace!("start");
+
+                            let canvas = buffer
+                                .canvas(self.wayland_client.get_screencopy_pool())
+                                .context("missing canvas????")?;
+                            let mut dst_image = Image::new(200, 100, PixelType::U8x4);
+                            let src_image = Image::from_slice_u8((buffer.stride() / 4) as u32, buffer.height() as u32, canvas, PixelType::U8x4)?;
+                            let mut resizer = Resizer::new();
+                            resizer.resize(&src_image, &mut dst_image, None)?;
+                            tracing::trace!("resized");
+
+                            let rgba = {
+                                let mut bgra = dst_image.into_vec();
+                                for chunk in bgra.chunks_exact_mut(4) {
+                                    chunk.swap(0, 2);
+                                }
+                                bgra
+                            };
+
+                            self.gui.update_item_preview(id, (&rgba, 200 * 4));
+                            tracing::trace!("completed");
                         }
                     }
                 },
@@ -166,6 +198,7 @@ impl Daemon {
 
                     match event {
                         DaemonEvent::WgpuSurface(wgpu, wgpu_surface_result) => {
+                            tracing::trace!("WGPU SURFACE RECEIVED!");
                             self.wgpu = wgpu.into();
 
                             match wgpu_surface_result {
@@ -184,17 +217,21 @@ impl Daemon {
                         }
                     }
                 }
-                result = self.geometry_worker_events.recv() => {
+                result = self.geometry_worker.recv() => {
                     let event = result.context("geometry worker has crashed")?;
                     tracing::debug!("geometry worker event: {:?}", event);
 
                     match event {
-                        GeometryWorkerEvent::ActiveWindow(request_id, geometry) => {
-                            let Some(active_request_id) = self.active_geometry_worker_request else {
+                        GeometryWorkerEvent::ActiveWindow(window_id, geometry) => {
+                            let Some(active_window_id) = self.get_active_window_id() else {
                                 continue
                             };
 
-                            if active_request_id != request_id {
+                            if active_window_id != window_id {
+                                continue
+                            }
+
+                            if self.visible {
                                 continue
                             }
 
@@ -204,7 +241,7 @@ impl Daemon {
                                 continue
                             }
 
-                            let _ = self.wayland_client.capture_active_window_region(x, y, width, height, &self.wayland_client_q.handle());
+                            let _ = self.wayland_client.capture_window_region(window_id, x, y, width, height, &self.wayland_client_q.handle());
                         }
                     }
                 }
@@ -221,11 +258,16 @@ impl Daemon {
                 result = self.screenshot_timer.wait() => {
                     result?;
 
-                    let request_id = self.geometry_worker.request_active_window_geometry()?;
-                    self.active_geometry_worker_request = Some(request_id);
+                    let Some(active_window_id) = self.get_active_window_id() else { continue };
+
+                    self.geometry_worker.request_active_window_geometry(active_window_id)?;
                 }
             }
         }
+    }
+
+    fn get_active_window_id(&self) -> Option<u32> {
+        self.gui.get_first_item_id()
     }
 
     fn request_repaint(&mut self) -> anyhow::Result<()> {
@@ -253,13 +295,15 @@ impl Daemon {
             if self.wayland_client.surfaces.is_some() {
                 return Ok(());
             }
+            tracing::trace!("VISIBILITY CALLED");
+            self.gui.reset_selected_item();
 
             self.wayland_client.create_surfaces(
                 &self.wayland_client_q.handle(),
                 self.width,
                 self.height,
             )?;
-            self.update_gui_items()?;
+            tracing::trace!("SURFACES CREATED");
         } else {
             // we can't drop surfaces right now
             if self.wgpu.is_none() {
@@ -272,53 +316,11 @@ impl Daemon {
         Ok(())
     }
 
-    fn update_gui_items(&mut self) -> anyhow::Result<()> {
-        self.gui.clear_items();
-        for window in self.wayland_client.toplevel_windows.iter_mut() {
-            if let Some(PreviewImage { buffer, is_rgba }) = &mut window.preview {
-                warn!(
-                    "has buffer {:?}",
-                    &buffer
-                        .canvas(&mut self.wayland_client.screenshot_pool)
-                        .context("missing")?[0..4]
-                );
-
-                let canvas = buffer
-                    .canvas(&mut self.wayland_client.screenshot_pool)
-                    .context("missing canvas????")?;
-
-                let rgba = if *is_rgba {
-                    canvas
-                } else {
-                    *is_rgba = true;
-
-                    for chunk in canvas.chunks_exact_mut(4) {
-                        chunk.swap(0, 2);
-                    }
-                    canvas
-                };
-
-                let size = [(buffer.stride() / 4) as usize, buffer.height() as usize];
-
-                let display_title = if window.title.is_empty() {
-                    &window.app_id
-                } else {
-                    &window.title
-                };
-
-                self.gui.add_item(display_title, size, &rgba);
-            }
-        }
-
-        self.request_repaint()?;
-
-        Ok(())
-    }
-
     fn paint(&mut self) -> anyhow::Result<()> {
         self.pending_repaint = false;
 
         if let (Some(wgpu), Some(wgpu_surface)) = (&mut self.wgpu, &mut self.wgpu_surface) {
+            tracing::trace!("PAINT COMPLETE");
             return self.gui.paint(wgpu, wgpu_surface);
         }
         warn!("paint requested but no surface?????");

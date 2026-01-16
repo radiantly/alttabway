@@ -60,9 +60,13 @@ pub enum WaylandClientEvent {
     LayerShellConfigure(LayerSurfaceConfigure),
     Egui(Vec<egui::Event>),
     ModifierChange,
-    Frame,    // TODO: To be renamed
-    Hide,     // TODO: To be removed
-    Activate, // TODO: To be renamed
+    PaintRequest,
+    TopLevelAdded(u32),
+    TopLevelActivated(u32),
+    TopLevelTitleUpdate(u32, String),
+    TopLevelAppIdUpdate(u32, String),
+    TopLevelRemoved(u32),
+    ScreencopyDone(u32, Buffer),
 }
 
 impl WaylandClientEvent {
@@ -136,16 +140,12 @@ impl TryFrom<(KeyEvent, bool, bool, Modifiers)> for WaylandClientEvent {
         let (key_event, pressed, repeat, modifiers) = value;
         let modifiers = Self::to_egui_modifier(modifiers);
 
-        if let Keysym::Escape = key_event.keysym {
-            return Ok(WaylandClientEvent::Hide);
-        }
-
         let key = match key_event.keysym {
             Keysym::Up => egui::Key::ArrowUp,
             Keysym::Down => egui::Key::ArrowDown,
             Keysym::Left => egui::Key::ArrowLeft,
             Keysym::Right => egui::Key::ArrowRight,
-            Keysym::Tab => egui::Key::Tab,
+            Keysym::Tab | Keysym::ISO_Left_Tab => egui::Key::Tab,
             Keysym::Return => egui::Key::Enter,
             _ => return Err("keyboard event not mapped"),
         };
@@ -162,10 +162,9 @@ impl TryFrom<(KeyEvent, bool, bool, Modifiers)> for WaylandClientEvent {
     }
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 pub struct ScreencopyFrameState {
-    window: ZwlrForeignToplevelHandleV1,
-
+    id: u32,
     width: i32,
     height: i32,
     stride: i32,
@@ -174,15 +173,10 @@ pub struct ScreencopyFrameState {
 }
 
 impl ScreencopyFrameState {
-    fn new(window: ZwlrForeignToplevelHandleV1) -> Self {
+    fn new(id: u32) -> Self {
         Self {
-            window,
-
-            width: Default::default(),
-            height: Default::default(),
-            stride: Default::default(),
-            buffer: Default::default(),
-            format: Default::default(),
+            id,
+            ..Default::default()
         }
     }
 
@@ -213,21 +207,6 @@ impl ScreencopyFrameState {
 }
 
 #[derive(Debug)]
-pub struct PreviewImage {
-    pub buffer: Buffer,
-    pub is_rgba: bool,
-}
-
-#[derive(Debug)]
-pub struct TopLevelWindow {
-    handle: ZwlrForeignToplevelHandleV1,
-    outputs: Vec<WlOutput>,
-    pub title: String,
-    pub app_id: String,
-    pub preview: Option<PreviewImage>,
-}
-
-#[derive(Debug)]
 pub struct Surfaces {
     pub layer_surface: LayerSurface,
     pub wl_surface: WlSurface,
@@ -245,11 +224,11 @@ pub struct WaylandClient {
     pub surfaces: Option<Surfaces>,
     wl_tx: UnboundedSender<WaylandClientEvent>,
     modifiers: Modifiers,
-    pub toplevel_windows: Vec<TopLevelWindow>,
+    toplevel_windows: Vec<ZwlrForeignToplevelHandleV1>,
 
     screencopy_manager: ZwlrScreencopyManagerV1,
     screencopy_frames: HashMap<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
-    pub screenshot_pool: SlotPool,
+    screencopy_pool: SlotPool,
 }
 
 pub struct RawHandles {
@@ -286,7 +265,7 @@ impl WaylandClient {
         let shm = Shm::bind(&globals, &qh)?;
 
         // TODO: dynamic resizing
-        let screenshot_pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
+        let screencopy_pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
 
         let wayland_app = Self {
             registry_state: RegistryState::new(&globals),
@@ -302,7 +281,7 @@ impl WaylandClient {
             toplevel_windows: Vec::new(),
             screencopy_manager,
             screencopy_frames: HashMap::new(),
-            screenshot_pool,
+            screencopy_pool,
         };
 
         Ok((wayland_app, event_queue, wl_rx))
@@ -310,6 +289,10 @@ impl WaylandClient {
 
     pub fn get_modifiers(&self) -> &Modifiers {
         &self.modifiers
+    }
+
+    pub fn get_screencopy_pool(&mut self) -> &mut SlotPool {
+        &mut self.screencopy_pool
     }
 
     pub fn create_surfaces(
@@ -369,62 +352,66 @@ impl WaylandClient {
         })
     }
 
-    fn with_window(
-        &mut self,
-        handle: &ZwlrForeignToplevelHandleV1,
-        f: impl FnOnce(&mut TopLevelWindow),
-    ) {
-        let Some(toplevel_window) = self
+    pub fn activate_window(&mut self, id: u32) {
+        let Some(window_handle) = self
             .toplevel_windows
-            .iter_mut()
-            .find(|window| &window.handle == handle)
+            .iter()
+            .find(|window| window.id().protocol_id() == id)
         else {
             return;
         };
 
-        f(toplevel_window)
+        let Some(seat) = &self.seat_state.seats().next() else {
+            return;
+        };
+        tracing::trace!("activating window {}", id);
+        window_handle.activate(seat);
     }
 
-    pub fn get_toplevel_windows(&mut self) -> &mut [TopLevelWindow] {
-        &mut self.toplevel_windows
-    }
-
-    pub fn capture_active_window_region(
+    pub fn capture_window_region(
         &mut self,
+        id: u32,
         x: i32,
         y: i32,
         width: i32,
         height: i32,
         queue_handle: &QueueHandle<Self>,
     ) -> anyhow::Result<()> {
-        let Some(active_window) = self.toplevel_windows.first_mut() else {
-            debug!("no active winwdow!");
+        if width <= 0 || height <= 0 {
+            return Ok(());
+        }
+
+        // I think this function can be much nicer if we get window preview via
+        // ext_foreign_toplevel_image_capture_source_manager_v1
+
+        // TODO: stitch windows that are part of different monitors
+
+        // Find the output that contains the given coordinates based on logical_position
+        let output_with_coords = self.output_state.outputs().find_map(|output| {
+            let Some(info) = self.output_state.info(&output) else {
+                return None;
+            };
+            let (output_x, output_y) = info.logical_position.unwrap_or(info.location);
+            let (output_w, output_h) = info.logical_size.unwrap_or_default();
+
+            let relative_x = x - output_x;
+            let relative_y = y - output_y;
+
+            if (0..=output_w).contains(&relative_x) && (0..=output_h).contains(&relative_y) {
+                (output, relative_x, relative_y).into()
+            } else {
+                None
+            }
+        });
+
+        let Some((output, relative_x, relative_y)) = output_with_coords else {
+            debug!("no output contains coordinates ({}, {})", x, y);
             return Ok(());
         };
-
-        let Some(output) = active_window.outputs.first() else {
-            debug!("this window isn't visible????");
-            return Ok(());
-        };
-
-        // TODO: different compositors might have different coord transforms. deal with it
-
-        // Get output position to convert global coordinates to output-relative coordinates
-        let Some(output_info) = self.output_state.info(output) else {
-            debug!("could not get output info");
-            return Ok(());
-        };
-
-        // Use logical_position if available, otherwise fall back to location
-        let (output_x, output_y) = output_info.logical_position.unwrap_or(output_info.location);
-
-        // Convert global coordinates to output-relative coordinates
-        let relative_x = x - output_x;
-        let relative_y = y - output_y;
 
         let frame = self.screencopy_manager.capture_output_region(
-            0, // overlay_cursor: 1 means include cursor, 0 means don't include
-            output,
+            0,
+            &output,
             relative_x,
             relative_y,
             width,
@@ -433,10 +420,8 @@ impl WaylandClient {
             (),
         );
 
-        self.screencopy_frames.insert(
-            frame,
-            ScreencopyFrameState::new(active_window.handle.clone()),
-        );
+        self.screencopy_frames
+            .insert(frame, ScreencopyFrameState::new(id));
 
         Ok(())
     }
@@ -468,7 +453,7 @@ impl CompositorHandler for WaylandClient {
         _surface: &WlSurface,
         _time: u32,
     ) {
-        self.wl_tx.send(WaylandClientEvent::Frame).unwrap();
+        self.wl_tx.send(WaylandClientEvent::PaintRequest).unwrap();
     }
 
     fn surface_enter(
@@ -737,7 +722,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 tracing::debug!("wsh {:?}:{:?}:{:?}", width, stride, height);
 
                 let Ok((buffer, _)) = state
-                    .screenshot_pool
+                    .screencopy_pool
                     .create_buffer(width, height, stride, format)
                 else {
                     tracing::error!("could not create buffer from pool!");
@@ -767,27 +752,23 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                         .buffer
                         .as_ref()
                         .unwrap()
-                        .canvas(&mut state.screenshot_pool)
+                        .canvas(&mut state.screencopy_pool)
                         .context("missing")
                         .unwrap()[0..4]
                 );
 
                 if let Some(ScreencopyFrameState {
-                    window,
+                    id,
                     buffer: Some(buffer),
                     ..
                 }) = state.screencopy_frames.remove(frame)
                 {
-                    tracing::debug!("screencopy is ready AND AVAILABLE");
-
-                    state.with_window(&window, |window| {
-                        window.preview = PreviewImage {
-                            buffer,
-                            is_rgba: false,
-                        }
-                        .into()
-                    });
+                    state
+                        .wl_tx
+                        .send(WaylandClientEvent::ScreencopyDone(id, buffer))
+                        .unwrap();
                 }
+                frame.destroy();
             }
             Event::Failed => {
                 tracing::warn!("Screencopy failed");
@@ -818,21 +799,18 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WaylandClient {
 
         match event {
             Event::Toplevel { toplevel } => {
-                state.toplevel_windows.push(TopLevelWindow {
-                    handle: toplevel,
-                    title: String::new(),
-                    app_id: String::new(),
-                    outputs: Default::default(),
-                    preview: None,
-                });
+                state
+                    .wl_tx
+                    .send(WaylandClientEvent::TopLevelAdded(
+                        toplevel.id().protocol_id(),
+                    ))
+                    .unwrap();
+                state.toplevel_windows.push(toplevel);
             }
             Event::Finished => {
-                tracing::info!(
-                    "Toplevel manager finished - compositor is shutting down the protocol"
-                );
                 state.toplevel_windows.clear();
             }
-            _ => {}
+            _ => unimplemented!(),
         }
     }
 
@@ -853,66 +831,40 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
     ) {
         use zwlr_foreign_toplevel_handle_v1::Event;
 
-        match event {
-            Event::Title { title } => {
-                state.with_window(handle, |window| window.title = title);
-            }
-            Event::AppId { app_id } => {
-                state.with_window(handle, |window| window.app_id = app_id);
-            }
-            Event::Closed => {
-                state
-                    .toplevel_windows
-                    .retain(|window| &window.handle != handle);
-            }
+        let id = handle.id().protocol_id();
+
+        let client_event = match event {
+            Event::Title { title } => WaylandClientEvent::TopLevelTitleUpdate(id, title).into(),
+            Event::AppId { app_id } => WaylandClientEvent::TopLevelAppIdUpdate(id, app_id).into(),
+            Event::Closed => WaylandClientEvent::TopLevelRemoved(id).into(),
             Event::State {
                 state: window_state,
             } => {
                 let activated = zwlr_foreign_toplevel_handle_v1::State::Activated as u8;
 
                 if window_state.contains(&activated) {
-                    // rotate_right may be more efficient here
-                    if let Some(pos) = state
-                        .toplevel_windows
-                        .iter()
-                        .position(|w| w.handle == *handle)
-                    {
-                        let window = state.toplevel_windows.remove(pos);
-                        state.toplevel_windows.insert(0, window);
-                        let _ = state.wl_tx.send(WaylandClientEvent::Activate);
-                    }
+                    WaylandClientEvent::TopLevelActivated(id).into()
+                } else {
+                    None
                 }
             }
 
             // this set of events have all been processed
-            Event::Done => {
-                let list = state
-                    .toplevel_windows
-                    .iter()
-                    .map(|window| window.app_id.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                tracing::trace!("windows: {}", list);
-            }
+            Event::Done => None,
 
             // windows have changed monitors
-            Event::OutputEnter { output } => {
-                state.with_window(handle, |window| {
-                    tracing::trace!("window {:?} has entered output.", window.app_id);
-                    window.outputs.push(output)
-                });
-            }
-            Event::OutputLeave { output } => {
-                state.with_window(handle, |window| {
-                    tracing::trace!("window {:?} has left output.", window.app_id);
-                    window.outputs.retain(|o| o != &output)
-                });
-            }
+            Event::OutputEnter { .. } => None,
+            Event::OutputLeave { .. } => None,
 
             // when the parent of the toplevel changes(?)
-            Event::Parent { parent: _ } => (),
-            _ => todo!(),
-        }
+            Event::Parent { .. } => None,
+            _ => unimplemented!(),
+        };
+
+        let Some(client_event) = client_event else {
+            return;
+        };
+
+        state.wl_tx.send(client_event).unwrap();
     }
 }

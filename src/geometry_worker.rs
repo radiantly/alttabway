@@ -3,25 +3,23 @@ use crate::{geometry_ipc::HyprlandIpc, geometry_provider::Geometry};
 use anyhow::{Result, bail};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-pub type GeometryRequestId = u64;
-
-enum GeometryWorkerRequestEvent {
-    ActiveWindow(GeometryRequestId),
+enum GeometryWorkerRequestEvent<U: Copy + Send + 'static> {
+    ActiveWindow(U),
 }
 
 #[derive(Debug)]
-pub enum GeometryWorkerEvent {
-    ActiveWindow(GeometryRequestId, Geometry),
+pub enum GeometryWorkerEvent<U: Copy + Send + 'static> {
+    ActiveWindow(U, Geometry),
 }
 
 #[derive(Debug)]
-pub struct GeometryWorker {
-    request_counter: GeometryRequestId,
-    request_tx: UnboundedSender<GeometryWorkerRequestEvent>,
+pub struct GeometryWorker<U: Copy + Send + 'static> {
+    request_tx: UnboundedSender<GeometryWorkerRequestEvent<U>>,
+    response_rx: UnboundedReceiver<GeometryWorkerEvent<U>>,
 }
 
-impl GeometryWorker {
-    pub fn new() -> Result<(Self, UnboundedReceiver<GeometryWorkerEvent>)> {
+impl<U: Copy + Send + 'static> GeometryWorker<U> {
+    pub fn new() -> Result<Self> {
         let mut provider: Box<dyn GeometryProvider + Send> = if let Ok(ipc) = HyprlandIpc::new() {
             Box::new(ipc)
         } else {
@@ -34,10 +32,10 @@ impl GeometryWorker {
         tokio::spawn(async move {
             while let Some(event) = request_rx.recv().await {
                 match event {
-                    GeometryWorkerRequestEvent::ActiveWindow(request_id) => {
+                    GeometryWorkerRequestEvent::ActiveWindow(user_data) => {
                         if let Ok(geometry) = provider.get_active_window_geometry()
                             && response_tx
-                                .send(GeometryWorkerEvent::ActiveWindow(request_id, geometry))
+                                .send(GeometryWorkerEvent::ActiveWindow(user_data, geometry))
                                 .is_err()
                         {
                             return;
@@ -47,21 +45,25 @@ impl GeometryWorker {
             }
         });
 
-        Ok((
-            Self {
-                request_counter: 0,
-                request_tx,
-            },
+        Ok(Self {
+            request_tx,
             response_rx,
-        ))
+        })
     }
 
-    pub fn request_active_window_geometry(&mut self) -> Result<GeometryRequestId> {
-        self.request_counter += 1;
-        self.request_tx
-            .send(GeometryWorkerRequestEvent::ActiveWindow(
-                self.request_counter,
-            ))?;
-        Ok(self.request_counter)
+    pub fn request_active_window_geometry(&mut self, user_data: U) -> Result<()> {
+        let result = self
+            .request_tx
+            .send(GeometryWorkerRequestEvent::ActiveWindow(user_data));
+
+        if result.is_err() {
+            bail!("failed to send. geometry worker is down.")
+        }
+
+        Ok(())
+    }
+
+    pub async fn recv(&mut self) -> Option<GeometryWorkerEvent<U>> {
+        self.response_rx.recv().await
     }
 }

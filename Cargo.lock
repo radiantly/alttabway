@@ -38,6 +38,7 @@ dependencies = [
  "clap",
  "egui",
  "egui-wgpu",
+ "fast_image_resize",
  "futures-util",
  "raw-window-handle",
  "rkyv",
@@ -495,6 +496,18 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fast_image_resize"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12dd43e5011e8d8411a3215a0d57a2ec5c68282fb90eb5d7221fab0113442174"
+dependencies = [
+ "cfg-if",
+ "document-features",
+ "num-traits",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

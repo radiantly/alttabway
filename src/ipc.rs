@@ -46,6 +46,7 @@ impl AlttabwayIpc {
 
             let response =
                 if let Ok(command) = rkyv::from_bytes::<IpcCommand, rancor::Error>(&bytes) {
+                    tracing::trace!("IPC RECEIVED");
                     tx.send(command)?;
                     IpcCommandResponse::Success
                 } else {
