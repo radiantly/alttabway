@@ -3,6 +3,7 @@ pub mod geometry_ipc;
 pub mod geometry_provider;
 pub mod geometry_worker;
 pub mod gui;
+pub mod gui_state;
 pub mod ipc;
 pub mod timer;
 pub mod wayland_client;

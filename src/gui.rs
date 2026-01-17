@@ -1,64 +1,31 @@
-use std::{cmp, fmt::Debug, iter, time::Duration};
+use std::{fmt::Debug, iter};
 
-use egui::{ColorImage, Context, Event, FullOutput, RawInput, TextureHandle, ViewportId};
+use egui::{Context, Event, Frame, FullOutput, RawInput, Stroke, UiBuilder};
 
-use crate::wgpu_wrapper::{WgpuSurface, WgpuWrapper};
-
-#[derive(Default)]
-pub struct Item {
-    id: u32,
-    title: String,
-    app_id: String,
-    preview: Option<TextureHandle>,
-}
-
-impl Item {
-    fn new(id: u32) -> Self {
-        Self {
-            id,
-            ..Default::default()
-        }
-    }
-}
-
-trait ItemVecExt {
-    fn with_id(&mut self, id: u32, f: impl FnOnce(&mut Item));
-}
-
-impl ItemVecExt for Vec<Item> {
-    fn with_id(&mut self, id: u32, f: impl FnOnce(&mut Item)) {
-        let Some(item) = self.iter_mut().find(|item| item.id == id) else {
-            return;
-        };
-        f(item).into()
-    }
-}
+use crate::{
+    gui_state::GuiState,
+    wgpu_wrapper::{WgpuSurface, WgpuWrapper},
+};
 
 pub struct Gui {
     egui_ctx: Context,
     egui_renderer: Option<egui_wgpu::Renderer>,
-    needs_repaint: bool,
 
-    items: Vec<Item>,
-    selected_item: usize,
+    state: GuiState,
 }
 
 impl Debug for Gui {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Gui")
-            .field("needs_repaint", &self.needs_repaint)
-            .finish()
+        f.debug_struct("Gui").finish()
     }
 }
 
 impl Default for Gui {
     fn default() -> Self {
         Self {
-            items: vec![],
             egui_ctx: Context::default(),
             egui_renderer: None,
-            needs_repaint: true,
-            selected_item: 0,
+            state: Default::default(),
         }
     }
 }
@@ -69,53 +36,45 @@ impl Gui {
     }
 
     pub fn add_item(&mut self, id: u32) {
-        self.items.push(Item::new(id));
+        self.state.add_item(id);
     }
 
     pub fn update_item_title(&mut self, id: u32, new_title: String) {
-        self.items.with_id(id, |item| item.title = new_title);
+        self.state.update_item_title(id, new_title);
     }
     pub fn update_item_app_id(&mut self, id: u32, new_app_id: String) {
-        self.items.with_id(id, |item| item.app_id = new_app_id);
+        self.state.update_item_app_id(id, new_app_id);
     }
     pub fn signal_item_activation(&mut self, id: u32) {
-        if let Some(pos) = self.items.iter().position(|item| item.id == id) {
-            self.items[..=pos].rotate_right(1);
-        }
+        self.state.signal_item_activation(id);
     }
     pub fn remove_item(&mut self, id: u32) {
-        self.items.retain(|item| item.id != id);
+        self.state.remove_item(id);
     }
     pub fn get_first_item_id(&self) -> Option<u32> {
-        self.items.first().map(|item| item.id)
+        self.state.get_first_item_id()
     }
-    pub fn update_item_preview(&mut self, id: u32, preview: (&[u8], usize)) {
-        self.items.with_id(id, |item| {
-            let (rgba, stride) = preview;
-            let size = [stride / 4, rgba.len() / stride];
-            let color_image = ColorImage::from_rgba_unmultiplied(size, rgba);
-
-            if let Some(texture_handle) = &mut item.preview {
-                texture_handle.set(color_image, Default::default());
-            } else {
-                item.preview = self
-                    .egui_ctx
-                    .load_texture(
-                        format!("preview-{}-{}", item.id, item.app_id),
-                        color_image,
-                        Default::default(),
-                    )
-                    .into();
-            };
-        });
+    pub fn update_item_preview(&mut self, id: u32, preview_rgba: &[u8], preview_width: u32) {
+        self.state.update_item_preview(
+            id,
+            (preview_rgba, preview_width as usize),
+            |name, color_image| {
+                self.egui_ctx
+                    .load_texture(name, color_image, Default::default())
+            },
+        );
     }
 
     pub fn reset_selected_item(&mut self) {
-        self.selected_item = cmp::min(1, self.items.len());
+        self.state.reset_selected_item();
     }
 
     pub fn get_selected_item_id(&self) -> Option<u32> {
-        self.items.get(self.selected_item).map(|item| item.id)
+        self.state.get_selected_item_id()
+    }
+
+    pub fn calculate_preview_size(&self, current_size: (u32, u32)) -> (u32, u32) {
+        self.state.calculate_preview_size(current_size)
     }
 
     pub fn handle_events(&mut self, events: Vec<Event>) {
@@ -127,13 +86,9 @@ impl Gui {
                 ..
             } = event
             {
-                if !self.items.is_empty() {
-                    self.selected_item += if modifiers.shift {
-                        self.items.len() - 1
-                    } else {
-                        1
-                    };
-                    self.selected_item %= self.items.len();
+                match modifiers.shift {
+                    true => self.state.select_previous_item(),
+                    false => self.state.select_next_item(),
                 }
             }
         }
@@ -143,60 +98,55 @@ impl Gui {
             focused: true,
             ..Default::default()
         };
-        self.build_output(raw_input);
+        self.build_ui(raw_input);
     }
 
-    fn build_output(&mut self, raw_input: RawInput) -> FullOutput {
+    pub fn get_window_dimensions(&mut self) -> (u32, u32) {
+        let layout = self.state.calculate_layout();
+        (layout.computed.window_width, layout.computed.window_height)
+    }
+
+    fn build_ui(&mut self, raw_input: RawInput) -> FullOutput {
+        let layout = self.state.calculate_layout();
+
         let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
             let panel_frame = egui::Frame::new()
                 .fill(egui::Color32::from_rgba_unmultiplied(25, 25, 25, 230))
-                .corner_radius(10.0)
-                .inner_margin(8.0);
+                .corner_radius(layout.params.window_corner_radius);
 
             egui::CentralPanel::default()
                 .frame(panel_frame)
                 .show(ctx, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.horizontal(|ui| {
-                            for (index, item) in self.items.iter_mut().enumerate() {
-                                egui::Frame::new()
-                                    .stroke(if index == self.selected_item {
-                                        egui::Stroke::new(2.0, egui::Color32::WHITE)
-                                    } else {
-                                        egui::Stroke::new(2.0, egui::Color32::TRANSPARENT)
-                                    })
-                                    .inner_margin(4.0)
-                                    .show(ui, |ui| {
-                                        ui.set_max_width(200.0);
-                                        ui.set_max_height(100.0);
-                                        ui.vertical(|ui| {
-                                            ui.label(&item.title);
-
-                                            if let Some(handle) = &item.preview {
-                                                ui.image((handle.id(), (200.0, 100.0).into()));
-                                            }
-                                        });
-                                    });
+                    for (index, (rect, item)) in layout
+                        .computed
+                        .item_rects
+                        .iter()
+                        .zip(layout.items)
+                        .enumerate()
+                    {
+                        let stroke_color = if layout.selected_item == index {
+                            egui::Color32::WHITE
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        let frame = Frame::default()
+                            .stroke(Stroke::new(layout.params.item_stroke as f32, stroke_color));
+                        tracing::info!("{:?} {:?}", rect, item.app_id);
+                        let mut child_ui = ui.new_child(UiBuilder::new().max_rect(*rect));
+                        frame.show(&mut child_ui, |ui| {
+                            if let Some((handle, [width, height])) = item.get_preview() {
+                                ui.image((handle.id(), (*width as f32, *height as f32).into()));
                             }
                         });
-                    });
+                    }
                 });
         });
-
-        self.needs_repaint = self.needs_repaint
-            || full_output.viewport_output[&ViewportId::ROOT].repaint_delay != Duration::MAX;
-
-        tracing::trace!(
-            "repaint delay {:?}, cause {:?}",
-            full_output.viewport_output[&ViewportId::ROOT].repaint_delay,
-            self.egui_ctx.repaint_causes()
-        );
 
         full_output
     }
 
     pub fn needs_repaint(&self) -> bool {
-        self.needs_repaint
+        self.state.needs_repaint()
     }
 
     pub fn paint(&mut self, wgpu: &mut WgpuWrapper, wsurf: &mut WgpuSurface) -> anyhow::Result<()> {
@@ -221,7 +171,7 @@ impl Gui {
             ..Default::default()
         };
 
-        let full_output = self.build_output(raw_input);
+        let full_output = self.build_ui(raw_input);
 
         let mut encoder = wgpu
             .device
@@ -303,7 +253,7 @@ impl Gui {
         output.present();
 
         tracing::trace!("Completed");
-        self.needs_repaint = false;
+        self.state.mark_repainted();
 
         Ok(())
     }

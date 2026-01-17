@@ -164,7 +164,7 @@ impl Daemon {
                             self.screenshot_timer.ping_after(Duration::from_secs(1)).await?;
                         }
                         WaylandClientEvent::TopLevelTitleUpdate(id, new_title) => self.gui.update_item_title(id, new_title),
-                        WaylandClientEvent::TopLevelAppIdUpdate(id, new_app_id) => self.gui.update_item_title(id, new_app_id),
+                        WaylandClientEvent::TopLevelAppIdUpdate(id, new_app_id) => self.gui.update_item_app_id(id, new_app_id),
                         WaylandClientEvent::TopLevelRemoved(id) => self.gui.remove_item(id),
                         WaylandClientEvent::ScreencopyDone(id, buffer) => {
                             // TODO: Resizing takes time, especially on slower computers
@@ -174,8 +174,12 @@ impl Daemon {
                             let canvas = buffer
                                 .canvas(self.wayland_client.get_screencopy_pool())
                                 .context("missing canvas????")?;
-                            let mut dst_image = Image::new(200, 100, PixelType::U8x4);
-                            let src_image = Image::from_slice_u8((buffer.stride() / 4) as u32, buffer.height() as u32, canvas, PixelType::U8x4)?;
+
+                            let (width, height) = ((buffer.stride() / 4) as u32, buffer.height() as u32);
+                            let (preview_width, preview_height) = self.gui.calculate_preview_size((width, height));
+
+                            let mut dst_image = Image::new(preview_width, preview_height, PixelType::U8x4);
+                            let src_image = Image::from_slice_u8(width, height, canvas, PixelType::U8x4)?;
                             let mut resizer = Resizer::new();
                             resizer.resize(&src_image, &mut dst_image, None)?;
                             tracing::trace!("resized");
@@ -188,7 +192,7 @@ impl Daemon {
                                 bgra
                             };
 
-                            self.gui.update_item_preview(id, (&rgba, 200 * 4));
+                            self.gui.update_item_preview(id, &rgba, preview_width);
                             tracing::trace!("completed");
                         }
                     }
@@ -297,6 +301,8 @@ impl Daemon {
             }
             tracing::trace!("VISIBILITY CALLED");
             self.gui.reset_selected_item();
+
+            (self.width, self.height) = self.gui.get_window_dimensions();
 
             self.wayland_client.create_surfaces(
                 &self.wayland_client_q.handle(),
