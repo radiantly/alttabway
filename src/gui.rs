@@ -1,6 +1,9 @@
 use std::{fmt::Debug, iter};
 
-use egui::{Context, Event, Frame, FullOutput, RawInput, Stroke, UiBuilder};
+use egui::{
+    Align, Color32, Context, CursorIcon, Event, Frame, FullOutput, Image, Label, Layout, RawInput,
+    Stroke, UiBuilder,
+};
 
 use crate::{
     gui_state::GuiState,
@@ -12,6 +15,7 @@ pub struct Gui {
     egui_renderer: Option<egui_wgpu::Renderer>,
 
     state: GuiState,
+    cursor_icon: CursorIcon,
 }
 
 impl Debug for Gui {
@@ -26,6 +30,7 @@ impl Default for Gui {
             egui_ctx: Context::default(),
             egui_renderer: None,
             state: Default::default(),
+            cursor_icon: CursorIcon::Default,
         }
     }
 }
@@ -77,8 +82,8 @@ impl Gui {
         self.state.calculate_preview_size(current_size)
     }
 
-    pub fn handle_events(&mut self, events: Vec<Event>) {
-        for event in &events {
+    pub fn handle_events(&mut self, mut events: Vec<Event>) {
+        for event in &mut events {
             if let Event::Key {
                 key: egui::Key::Tab,
                 pressed: true,
@@ -108,6 +113,7 @@ impl Gui {
 
     fn build_ui(&mut self, raw_input: RawInput) -> FullOutput {
         let layout = self.state.calculate_layout();
+        let mut hovered_item_updated = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
             let panel_frame = egui::Frame::new()
@@ -124,29 +130,70 @@ impl Gui {
                         .zip(layout.items)
                         .enumerate()
                     {
-                        let stroke_color = if layout.selected_item == index {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        };
-                        let frame = Frame::default()
-                            .stroke(Stroke::new(layout.params.item_stroke as f32, stroke_color));
-                        tracing::info!("{:?} {:?}", rect, item.app_id);
-                        let mut child_ui = ui.new_child(UiBuilder::new().max_rect(*rect));
-                        frame.show(&mut child_ui, |ui| {
+                        let mut frame_ui = ui.new_child(UiBuilder::new().max_rect(*rect));
+
+                        let mut frame = Frame::default()
+                            .stroke(Stroke::new(
+                                layout.params.item_stroke as f32,
+                                Color32::TRANSPARENT,
+                            ))
+                            .inner_margin(layout.params.item_padding as f32)
+                            .corner_radius(layout.params.item_corner_radius)
+                            .begin(&mut frame_ui);
+                        {
+                            let ui = &mut frame.content_ui;
+                            ui.allocate_ui_with_layout(
+                                (ui.available_width(), layout.params.title_height as f32).into(),
+                                Layout::left_to_right(Align::Center),
+                                |ui| ui.add(Label::new(item.get_title()).truncate()),
+                            );
                             if let Some((handle, [width, height])) = item.get_preview() {
-                                ui.image((handle.id(), (*width as f32, *height as f32).into()));
+                                ui.add(
+                                    Image::from_texture((
+                                        handle.id(),
+                                        (*width as f32, *height as f32).into(),
+                                    ))
+                                    .corner_radius(layout.params.preview_corner_radius),
+                                );
+                            } else {
+                                ui.allocate_space(ui.available_size());
                             }
-                        });
+                        }
+
+                        let response = frame.allocate_space(&mut frame_ui);
+                        if response.hovered() {
+                            hovered_item_updated = index.into();
+                        }
+
+                        if layout.selected_item == index {
+                            frame.frame.stroke.color = Color32::WHITE;
+                            frame.frame.fill = layout.params.item_active_background;
+                        } else if let Some(hovered_item) = layout.hovered_item
+                            && hovered_item == index
+                        {
+                            frame.frame.fill = layout.params.item_hover_background;
+                        }
+                        frame.paint(&frame_ui);
                     }
                 });
         });
+
+        self.cursor_icon = match hovered_item_updated {
+            Some(_) => CursorIcon::PointingHand,
+            None => CursorIcon::Default,
+        };
+
+        self.state.set_hovered_item(hovered_item_updated);
 
         full_output
     }
 
     pub fn needs_repaint(&self) -> bool {
         self.state.needs_repaint()
+    }
+
+    pub fn get_cursor_icon(&mut self) -> &CursorIcon {
+        &self.cursor_icon
     }
 
     pub fn paint(&mut self, wgpu: &mut WgpuWrapper, wsurf: &mut WgpuSurface) -> anyhow::Result<()> {

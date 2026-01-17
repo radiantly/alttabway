@@ -119,7 +119,7 @@ impl Daemon {
                             let width = if width == 0 { self.width } else { width };
                             let height = if height == 0 { self.height } else { height };
 
-                            if !self.visible || self.wayland_client.surfaces.is_none() || self.wgpu_surface.is_some() {
+                            if !self.visible || !self.wayland_client.has_surfaces() || self.wgpu_surface.is_some() {
                                 continue;
                             }
 
@@ -157,7 +157,7 @@ impl Daemon {
                             self.gui.signal_item_activation(id);
 
                             // take screenshot for preview
-                            if self.visible && self.wayland_client.surfaces.is_some() {
+                            if self.visible && self.wayland_client.has_surfaces() {
                                 continue
                             }
 
@@ -281,13 +281,9 @@ impl Daemon {
         self.pending_repaint = true;
 
         trace!("repaint requested");
+        self.wayland_client
+            .request_paint(&self.wayland_client_q.handle());
 
-        if let Some(surfaces) = &self.wayland_client.surfaces {
-            surfaces
-                .wl_surface
-                .frame(&self.wayland_client_q.handle(), surfaces.wl_surface.clone());
-            surfaces.wl_surface.commit();
-        }
         Ok(())
     }
 
@@ -296,7 +292,7 @@ impl Daemon {
 
         if visible {
             // already visible
-            if self.wayland_client.surfaces.is_some() {
+            if self.wayland_client.has_surfaces() {
                 return Ok(());
             }
             tracing::trace!("VISIBILITY CALLED");
@@ -316,7 +312,7 @@ impl Daemon {
                 return Ok(());
             }
             self.wgpu_surface.take();
-            self.wayland_client.surfaces.take();
+            self.wayland_client.destroy_surfaces();
         }
 
         Ok(())
@@ -327,7 +323,21 @@ impl Daemon {
 
         if let (Some(wgpu), Some(wgpu_surface)) = (&mut self.wgpu, &mut self.wgpu_surface) {
             tracing::trace!("PAINT COMPLETE");
-            return self.gui.paint(wgpu, wgpu_surface);
+            self.gui.paint(wgpu, wgpu_surface)?;
+
+            // Update cursor icon
+            use smithay_client_toolkit::seat::pointer::CursorIcon;
+            match self.gui.get_cursor_icon() {
+                egui::CursorIcon::Default => {
+                    self.wayland_client.request_cursor(CursorIcon::Default)
+                }
+                egui::CursorIcon::PointingHand => {
+                    self.wayland_client.request_cursor(CursorIcon::Pointer)
+                }
+                _ => (),
+            }
+
+            return Ok(());
         }
         warn!("paint requested but no surface?????");
         Ok(())

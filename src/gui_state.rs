@@ -1,10 +1,12 @@
-use egui::{ColorImage, Pos2, Rect, TextureHandle};
+use std::borrow::Cow;
+
+use egui::{Color32, ColorImage, Pos2, Rect, TextureHandle, hex_color};
 
 #[derive(Default)]
 pub struct Item {
     id: u32,
     title: String,
-    pub app_id: String,
+    app_id: String,
     preview: Option<(TextureHandle, [usize; 2])>,
 }
 
@@ -18,6 +20,24 @@ impl Item {
 
     pub fn get_preview(&self) -> &Option<(TextureHandle, [usize; 2])> {
         &self.preview
+    }
+
+    pub fn get_title(&self) -> Cow<'_, str> {
+        if self.app_id.is_empty() {
+            if self.title.is_empty() {
+                // TODO: maybe we shouldn't show windows that don't have an app id and title?
+                // fix if someone complains about it
+                return "Untitled Window".into();
+            }
+            return self.title.as_str().into();
+        }
+        format!(
+            "{} | {}{}",
+            &self.title,
+            self.app_id[..1].to_uppercase(),
+            &self.app_id.get(1..).unwrap_or_default()
+        )
+        .into()
     }
 }
 
@@ -40,9 +60,15 @@ pub struct LayoutParams {
     pub window_padding: u32,
     items_gap: u32,
     pub item_stroke: u32,
+    pub item_padding: u32,
+    pub item_corner_radius: f32,
+    pub item_hover_background: Color32,
+    pub item_active_background: Color32,
+    pub title_height: u32,
     preview_height: u32,
     preview_min_width: u32,
     preview_max_width: u32,
+    pub preview_corner_radius: f32,
 }
 
 impl Default for LayoutParams {
@@ -52,10 +78,16 @@ impl Default for LayoutParams {
             window_corner_radius: 8.0,
             window_padding: 10,
             items_gap: 10,
-            item_stroke: 2,
+            item_stroke: 0,
+            item_padding: 7,
+            item_corner_radius: 5.0,
+            item_hover_background: hex_color!("#00000022"),
+            item_active_background: hex_color!("#00000055"),
+            title_height: 25,
             preview_height: 100,
             preview_min_width: 100,
             preview_max_width: 200,
+            preview_corner_radius: 3.0,
         }
     }
 }
@@ -70,6 +102,7 @@ pub struct LayoutComputed {
 pub struct LayoutResult<'a> {
     pub items: &'a [Item],
     pub selected_item: usize,
+    pub hovered_item: Option<usize>,
     pub params: &'a LayoutParams,
     pub computed: &'a LayoutComputed,
 }
@@ -78,6 +111,7 @@ pub struct LayoutResult<'a> {
 pub struct GuiState {
     items: Vec<Item>,
     selected_item: usize,
+    hovered_item: Option<usize>,
     needs_repaint: bool,
     layout_params: LayoutParams,
     layout_computed: LayoutComputed,
@@ -168,6 +202,12 @@ impl GuiState {
         self.selected_item = (self.selected_item + self.items.len() - 1) % self.items.len();
         self.needs_repaint = true;
     }
+    pub fn set_hovered_item(&mut self, index: Option<usize>) {
+        if self.hovered_item != index {
+            self.hovered_item = index;
+            self.needs_repaint = true;
+        }
+    }
     pub fn needs_repaint(&self) -> bool {
         self.needs_repaint
     }
@@ -180,11 +220,14 @@ impl GuiState {
             Some((_, [width, _])) => width as u32,
             _ => self.layout_params.preview_min_width,
         };
-        content_width + self.layout_params.item_stroke * 2
+        content_width + self.layout_params.item_stroke * 2 + self.layout_params.item_padding * 2
     }
 
     fn get_item_height(&self) -> u32 {
-        self.layout_params.preview_height + self.layout_params.item_stroke * 2
+        self.layout_params.title_height
+            + self.layout_params.preview_height
+            + self.layout_params.item_stroke * 2
+            + self.layout_params.item_padding * 2
     }
 
     // Calculate layout
@@ -225,10 +268,9 @@ impl GuiState {
 
         let x = self.layout_params.window_padding as f32;
         let mut y = self.layout_params.window_padding as f32;
+        let row_height = self.get_item_height() as f32;
         for (row, row_width) in rows.into_iter() {
             let mut x = (longest_row_width - row_width) as f32 / 2.0 + x;
-
-            let row_height = self.layout_params.preview_height as f32;
 
             for item_width in row.into_iter() {
                 let rect = Rect {
@@ -253,6 +295,7 @@ impl GuiState {
         LayoutResult {
             items: &self.items,
             selected_item: self.selected_item,
+            hovered_item: self.hovered_item,
             params: &self.layout_params,
             computed: &self.layout_computed,
         }

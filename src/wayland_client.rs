@@ -36,7 +36,9 @@ use smithay_client_toolkit::{
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{
+            CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer,
+        },
     },
     shell::{
         WaylandSurface,
@@ -220,7 +222,7 @@ pub struct WaylandClient {
     seat_state: SeatState,
     shm: Shm,
     connection: Connection,
-    pub surfaces: Option<Surfaces>,
+    surfaces: Option<Surfaces>,
     wl_tx: UnboundedSender<WaylandClientEvent>,
     modifiers: Modifiers,
     toplevel_windows: Vec<ZwlrForeignToplevelHandleV1>,
@@ -228,6 +230,10 @@ pub struct WaylandClient {
     screencopy_manager: ZwlrScreencopyManagerV1,
     screencopy_frames: HashMap<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
     screencopy_pool: SlotPool,
+
+    themed_pointer: Option<ThemedPointer>,
+    current_cursor: Option<CursorIcon>,
+    requested_cursor: CursorIcon,
 }
 
 pub struct RawHandles {
@@ -281,6 +287,10 @@ impl WaylandClient {
             screencopy_manager,
             screencopy_frames: HashMap::new(),
             screencopy_pool,
+
+            themed_pointer: None,
+            current_cursor: None,
+            requested_cursor: CursorIcon::Default,
         };
 
         Ok((wayland_app, event_queue, wl_rx))
@@ -288,6 +298,26 @@ impl WaylandClient {
 
     pub fn get_modifiers(&self) -> &Modifiers {
         &self.modifiers
+    }
+
+    fn set_cursor(&mut self) {
+        if let Some(ref mut pointer) = self.themed_pointer {
+            if pointer
+                .set_cursor(&self.connection, self.requested_cursor)
+                .is_ok()
+            {
+                self.current_cursor = self.requested_cursor.into();
+            }
+        }
+    }
+
+    pub fn request_cursor(&mut self, icon: CursorIcon) {
+        self.requested_cursor = icon;
+        if let Some(current_icon) = self.current_cursor
+            && current_icon != icon
+        {
+            self.set_cursor();
+        }
     }
 
     pub fn get_screencopy_pool(&mut self) -> &mut SlotPool {
@@ -326,6 +356,22 @@ impl WaylandClient {
         self.surfaces = Some(surfaces);
 
         Ok(())
+    }
+
+    pub fn has_surfaces(&self) -> bool {
+        self.surfaces.is_some()
+    }
+
+    pub fn destroy_surfaces(&mut self) {
+        self.current_cursor = None;
+        self.surfaces.take();
+    }
+
+    pub fn request_paint(&mut self, qh: &QueueHandle<Self>) {
+        if let Some(surfaces) = &self.surfaces {
+            surfaces.wl_surface.frame(qh, surfaces.wl_surface.clone());
+            surfaces.wl_surface.commit();
+        }
     }
 
     pub fn get_raw_handles(&self) -> anyhow::Result<RawHandles> {
@@ -536,8 +582,18 @@ impl SeatHandler for WaylandClient {
             tracing::warn!("Failed to get keyboard capability");
         }
 
-        if capability == Capability::Pointer && self.seat_state.get_pointer(qh, &seat).is_err() {
-            tracing::warn!("Failed to get pointer capability");
+        if capability == Capability::Pointer && self.themed_pointer.is_none() {
+            let surface = self.compositor_state.create_surface(qh);
+            match self.seat_state.get_pointer_with_theme(
+                qh,
+                &seat,
+                self.shm.wl_shm(),
+                surface,
+                ThemeSpec::default(),
+            ) {
+                Ok(pointer) => self.themed_pointer = Some(pointer),
+                Err(e) => tracing::warn!("Failed to get themed pointer: {:?}", e),
+            }
         }
     }
 
@@ -638,6 +694,14 @@ impl PointerHandler for WaylandClient {
         _pointer: &WlPointer,
         events: &[PointerEvent],
     ) {
+        // Set cursor on enter events
+        for event in events {
+            if matches!(event.kind, PointerEventKind::Enter { .. }) {
+                self.set_cursor();
+                break;
+            }
+        }
+
         if let Ok(event) = (events, self.modifiers).try_into() {
             self.wl_tx.send(event).unwrap()
         }
