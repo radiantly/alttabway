@@ -21,8 +21,20 @@ alttabway is now installed! Follow compositor specific instructions to start the
 Add the following lines to your `~/.config/hypr/hyprland.conf`
 ```
 exec-once = alttabway daemon &
-bindn = ALT, Tab, exec, alttabway show
+binde = ALT, Tab, exec, alttabway show --next
+binde = ALT SHIFT, Tab, exec, alttabway show --previous
 ```
+
+<details>
+<summary>Configuration options</summary>
+
+```
+# Activate using Ctrl+Super+Tab
+binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
+binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super
+```
+
+</details>
 
 ### FAQ
 
@@ -30,9 +42,13 @@ bindn = ALT, Tab, exec, alttabway show
 
 alttabway uses wlr-screencopy-unstable-v1 to generate a preview of your active window. Sometimes, it is unable to generate this preview if you open a window and navigate away from it too quickly.
 
-#### Sometimes there's a delay between holding the alt-tab and the window showing up
+#### Sometimes there's a delay between holding the alt-tab hotkey and the window showing up
 
 Window preview resizing runs on the main thread and needs to move to a background thread. Should be fixed soon.
+
+#### Can I use a different hotkey combination?
+
+No
 
 #### Please support $COMPOSITOR
 

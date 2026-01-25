@@ -56,112 +56,7 @@ use std::{collections::HashMap, ffi::c_void, ptr::NonNull};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tracing::{debug, warn};
 
-#[derive(Debug)]
-pub enum WaylandClientEvent {
-    LayerShellConfigure(LayerSurfaceConfigure),
-    Egui(Vec<egui::Event>),
-    ModifierChange,
-    PaintRequest,
-    TopLevelAdded(u32),
-    TopLevelActivated(u32),
-    TopLevelTitleUpdate(u32, String),
-    TopLevelAppIdUpdate(u32, String),
-    TopLevelRemoved(u32),
-    ScreencopyDone(u32, Buffer),
-}
-
-impl WaylandClientEvent {
-    fn to_egui_modifier(modifiers: Modifiers) -> egui::Modifiers {
-        egui::Modifiers {
-            alt: modifiers.alt,
-            ctrl: modifiers.ctrl,
-            shift: modifiers.shift,
-            mac_cmd: false,
-            command: modifiers.ctrl,
-        }
-    }
-
-    fn to_egui_button(button: u32) -> egui::PointerButton {
-        match button {
-            272 => egui::PointerButton::Primary,
-            273 => egui::PointerButton::Secondary,
-            274 => egui::PointerButton::Middle,
-            _ => egui::PointerButton::Extra1,
-        }
-    }
-
-    fn to_egui_pos2(position: (f64, f64)) -> egui::Pos2 {
-        egui::Pos2 {
-            x: position.0 as f32,
-            y: position.1 as f32,
-        }
-    }
-}
-
-impl TryFrom<(&[PointerEvent], Modifiers)> for WaylandClientEvent {
-    type Error = &'static str;
-
-    fn try_from(value: (&[PointerEvent], Modifiers)) -> Result<Self, Self::Error> {
-        let (pointer_events, modifiers) = value;
-        let modifiers = Self::to_egui_modifier(modifiers);
-
-        let events: Vec<_> = pointer_events
-            .iter()
-            .filter_map(|event| match event.kind {
-                PointerEventKind::Motion { .. } => Some(egui::Event::PointerMoved(
-                    Self::to_egui_pos2(event.position),
-                )),
-                PointerEventKind::Press { button, .. } => Some(egui::Event::PointerButton {
-                    pos: Self::to_egui_pos2(event.position),
-                    button: Self::to_egui_button(button),
-                    pressed: true,
-                    modifiers,
-                }),
-                PointerEventKind::Release { button, .. } => Some(egui::Event::PointerButton {
-                    pos: Self::to_egui_pos2(event.position),
-                    button: Self::to_egui_button(button),
-                    pressed: false,
-                    modifiers,
-                }),
-                _ => None,
-            })
-            .collect();
-
-        if events.is_empty() {
-            return Err("no relevant pointer events to send!");
-        }
-        Ok(Self::Egui(events))
-    }
-}
-
-impl TryFrom<(KeyEvent, bool, bool, Modifiers)> for WaylandClientEvent {
-    type Error = &'static str;
-
-    fn try_from(value: (KeyEvent, bool, bool, Modifiers)) -> Result<Self, Self::Error> {
-        let (key_event, pressed, repeat, modifiers) = value;
-        let modifiers = Self::to_egui_modifier(modifiers);
-
-        let key = match key_event.keysym {
-            Keysym::Up => egui::Key::ArrowUp,
-            Keysym::Down => egui::Key::ArrowDown,
-            Keysym::Left => egui::Key::ArrowLeft,
-            Keysym::Right => egui::Key::ArrowRight,
-            Keysym::Tab | Keysym::ISO_Left_Tab => egui::Key::Tab,
-            Keysym::Return => egui::Key::Enter,
-            _ => return Err("keyboard event not mapped"),
-        };
-
-        let event = egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed,
-            repeat,
-            modifiers,
-        };
-
-        Ok(Self::Egui(vec![event]))
-    }
-}
+use crate::wayland_client_event::WaylandClientEvent;
 
 #[derive(Default, Debug)]
 pub struct ScreencopyFrameState {
@@ -640,7 +535,8 @@ impl KeyboardHandler for WaylandClient {
         _serial: u32,
         event: KeyEvent,
     ) {
-        if let Ok(event) = (event, true, false, self.modifiers).try_into() {
+        if let Ok(event) = WaylandClientEvent::from_wl_key_event(event, true, false, self.modifiers)
+        {
             self.wl_tx.send(event).unwrap()
         }
     }
@@ -653,7 +549,9 @@ impl KeyboardHandler for WaylandClient {
         _serial: u32,
         event: KeyEvent,
     ) {
-        if let Ok(event) = (event, false, false, self.modifiers).try_into() {
+        if let Ok(event) =
+            WaylandClientEvent::from_wl_key_event(event, false, false, self.modifiers)
+        {
             self.wl_tx.send(event).unwrap()
         }
     }
@@ -680,7 +578,8 @@ impl KeyboardHandler for WaylandClient {
         _serial: u32,
         event: KeyEvent,
     ) {
-        if let Ok(event) = (event, true, true, self.modifiers).try_into() {
+        if let Ok(event) = WaylandClientEvent::from_wl_key_event(event, true, true, self.modifiers)
+        {
             self.wl_tx.send(event).unwrap()
         }
     }
@@ -702,7 +601,7 @@ impl PointerHandler for WaylandClient {
             }
         }
 
-        if let Ok(event) = (events, self.modifiers).try_into() {
+        if let Ok(event) = WaylandClientEvent::from_wl_pointer_events(events, self.modifiers) {
             self.wl_tx.send(event).unwrap()
         }
     }
@@ -809,7 +708,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 };
             }
             Event::Ready { .. } => {
-                tracing::warn!(
+                tracing::debug!(
                     "ready buffer {:?}",
                     &frame_state
                         .buffer

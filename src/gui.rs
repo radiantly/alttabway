@@ -82,6 +82,14 @@ impl Gui {
         self.state.calculate_preview_size(current_size)
     }
 
+    pub fn select_previous_item(&mut self) {
+        self.state.select_previous_item()
+    }
+
+    pub fn select_next_item(&mut self) {
+        self.state.select_next_item()
+    }
+
     pub fn handle_events(&mut self, mut events: Vec<Event>) {
         for event in &mut events {
             if let Event::Key {

@@ -1,4 +1,4 @@
-use wgpu::{Adapter, Instance, TextureFormat};
+use wgpu::{Adapter, Backends, Instance, InstanceDescriptor, TextureFormat};
 
 use crate::wayland_client::RawHandles;
 use std::fmt;
@@ -10,15 +10,15 @@ pub struct WgpuWrapper {
 }
 
 impl WgpuWrapper {
-    pub async fn init() -> anyhow::Result<Self> {
+    pub async fn init(backends: impl Into<Backends>) -> anyhow::Result<Self> {
         // Initialize wgpu
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+        let instance = wgpu::Instance::new(&InstanceDescriptor {
+            backends: backends.into(),
             ..Default::default()
         });
 
-        tracing::info!("requesting adapter...");
+        tracing::debug!("requesting adapter...");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -27,7 +27,12 @@ impl WgpuWrapper {
             })
             .await?;
 
-        tracing::info!("adapter acquired, requesting device...");
+        let adapter_info = adapter.get_info();
+        tracing::info!(
+            "Adapter [{}][{}] acquired.",
+            adapter_info.name,
+            adapter_info.backend
+        );
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 required_features: wgpu::Features::default(),
@@ -39,7 +44,7 @@ impl WgpuWrapper {
             })
             .await?;
 
-        tracing::info!("device aquired, continuing...");
+        tracing::debug!("device aquired, continuing...");
 
         let wgpu_wrapper = Self {
             instance,

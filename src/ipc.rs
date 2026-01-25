@@ -1,18 +1,36 @@
-use std::{env, fs, path::PathBuf};
-
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use rkyv::{Archive, Deserialize, Serialize, rancor};
+use std::{env, fs, path::PathBuf};
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::instrument;
+
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, Copy)]
+pub enum Direction {
+    Previous,
+    Next,
+}
+
+#[derive(Hash, Archive, Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+pub enum Modifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Super,
+}
+
 #[derive(Archive, Serialize, Deserialize, Debug)]
 pub enum IpcCommand {
     Ping,
-    Show,
+    Show {
+        direction: Option<Direction>,
+        modifiers: Vec<Modifier>,
+    },
     Hide,
 }
 

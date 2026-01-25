@@ -1,3 +1,4 @@
+pub mod config_worker;
 pub mod daemon;
 pub mod geometry_ipc;
 pub mod geometry_provider;
@@ -7,4 +8,5 @@ pub mod gui_state;
 pub mod ipc;
 pub mod timer;
 pub mod wayland_client;
+pub mod wayland_client_event;
 pub mod wgpu_wrapper;

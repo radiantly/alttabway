@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{mem, time::Duration};
 
 use anyhow::{Context, bail};
 use smithay_client_toolkit::reexports::client::EventQueue;
@@ -9,11 +9,13 @@ use tokio::{
 use tracing::{debug, trace, warn};
 
 use crate::{
+    config_worker::ConfigHandle,
     geometry_worker::{GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
-    ipc::{AlttabwayIpc, IpcCommand},
+    ipc::{AlttabwayIpc, Direction, IpcCommand, Modifier},
     timer::Timer,
-    wayland_client::{WaylandClient, WaylandClientEvent},
+    wayland_client::WaylandClient,
+    wayland_client_event::WaylandClientEvent,
     wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
 
@@ -52,14 +54,21 @@ pub struct Daemon {
     visible: bool,
 
     screenshot_timer: Timer,
+
+    /// Modifier keys that are required to be pressed for the window to show
+    required_modifiers: Vec<Modifier>,
 }
 
 impl Daemon {
+    pub const DEFAULT_REQ_MODIFIER: [Modifier; 1] = [Modifier::Alt];
+
     pub async fn start() -> anyhow::Result<()> {
+        // IPC Listener makes sure that this is the only instance running
         let ipc_listener = AlttabwayIpc::start_server().await?;
+        let config_handle = ConfigHandle::new();
         let geometry_worker = GeometryWorker::new()?;
 
-        let wgpu_wrapper = WgpuWrapper::init().await?;
+        let wgpu_wrapper = WgpuWrapper::init(config_handle.get().render_backend).await?;
 
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
 
@@ -83,6 +92,7 @@ impl Daemon {
             ipc_listener,
             visible: false,
             screenshot_timer: Timer::new(Duration::from_secs(5)),
+            required_modifiers: Self::DEFAULT_REQ_MODIFIER.to_vec(),
         };
 
         Daemon::run_loop(&mut daemon).await
@@ -143,8 +153,13 @@ impl Daemon {
                         }
                         WaylandClientEvent::PaintRequest => self.paint()?,
                         WaylandClientEvent::ModifierChange => {
-                            if !self.wayland_client.get_modifiers().alt {
+                            let wl_modifiers = self.wayland_client.get_modifiers();
 
+                            if !wl_modifiers.ctrl && self.required_modifiers.contains(&Modifier::Ctrl) ||
+                               !wl_modifiers.alt && self.required_modifiers.contains(&Modifier::Alt) ||
+                               !wl_modifiers.shift && self.required_modifiers.contains(&Modifier::Shift) ||
+                               !wl_modifiers.logo && self.required_modifiers.contains(&Modifier::Super)
+                            {
                                 if let Some(window_id) = self.gui.get_selected_item_id() {
                                     self.wayland_client.activate_window(window_id);
                                 }
@@ -255,7 +270,20 @@ impl Daemon {
 
                     match event {
                         IpcCommand::Ping => (),
-                        IpcCommand::Show => self.update_visibility(true)?,
+                        IpcCommand::Show { direction, mut modifiers } => {
+                            mem::swap(&mut self.required_modifiers, &mut modifiers);
+                            if self.visible {
+                                if let Some(direction) = direction {
+                                    match direction {
+                                        Direction::Previous => self.gui.select_previous_item(),
+                                        Direction::Next => self.gui.select_next_item(),
+                                    }
+                                    self.request_repaint()?;
+                                }
+                            } else {
+                                self.update_visibility(true)?;
+                            }
+                        }
                         IpcCommand::Hide => self.update_visibility(false)?,
                     }
                 }
