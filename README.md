@@ -1,42 +1,40 @@
 # alttabway
 
-Finally, an alt-tab window switcher with actual window previews.
+Finally, an alt-tab window switcher with actual window previews. Only Hyprland is supported at the moment.
 
-![Preview](.github/preview.png)
+![Preview](https://cdn.jsdelivr.net/gh/radiantly/alttabway/.github/preview.png)
 
-### Usage
+## Usage
 
-You will need rust and cargo installed for building.
+You will need [cargo](https://doc.rust-lang.org/stable/cargo/getting-started/installation.html) installed.
 
 ```sh
-git clone https://github.com/radiantly/alttabway
-cd alttabway
-cargo install --path .
+cargo install alttabway
 ```
 
 alttabway is now installed! Follow compositor specific instructions to start the daemon and bind the hotkey.
 
-#### Hyprland
+- #### Hyprland
 
-Add the following lines to your `~/.config/hypr/hyprland.conf`
-```
-exec-once = alttabway daemon &
-binde = ALT, Tab, exec, alttabway show --next
-binde = ALT SHIFT, Tab, exec, alttabway show --previous
-```
+  Add the following lines to your `~/.config/hypr/hyprland.conf`
+  ```
+  exec-once = alttabway daemon &
+  binde = ALT, Tab, exec, alttabway show --next
+  binde = ALT SHIFT, Tab, exec, alttabway show --previous
+  ```
 
-<details>
-<summary>Configuration options</summary>
+  <details>
+  <summary>Configuration options</summary>
 
-```
-# Activate using Ctrl+Super+Tab
-binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
-binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super
-```
+  ```
+  # Activate using Ctrl+Super+Tab
+  binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
+  binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super
+  ```
 
-</details>
+  </details>
 
-### FAQ
+## FAQ
 
 #### The window preview is sometimes missing. Why?
 

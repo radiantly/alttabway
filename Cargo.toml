@@ -1,10 +1,11 @@
 [package]
 name = "alttabway"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Alt-tab window switcher for wayland compositors"
 repository = "https://github.com/radiantly/alttabway"
 license = "LGPL-3.0-only"
+include = ["**/*.rs"]
 
 [dependencies]
 anyhow = "1.0.100"
