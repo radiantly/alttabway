@@ -17,6 +17,7 @@ alttabway is now installed! Follow compositor specific instructions to start the
 - #### Hyprland
 
   Add the following lines to your `~/.config/hypr/hyprland.conf`
+
   ```
   exec-once = alttabway daemon &
   binde = ALT, Tab, exec, alttabway show --next
@@ -52,10 +53,14 @@ No
 
 alttabway only provides support for Hyprland (Sway and Niri coming in the near future). Open an issue if you'd like support for your compositor. Typically the compositor should implement the following protocols.
 
- - wlr-foreign-toplevel-management-unstable-v1 for the list of top level windows and to activate one
- - wlr-screencopy-unstable-v1 to take a capture of a region on screen.
-   - Window positions/dimensions are required as well, typically via ipc.
+- wlr-foreign-toplevel-management-unstable-v1 for the list of top level windows and to activate one
+- wlr-screencopy-unstable-v1 to take a capture of a region on screen.
+  - Window positions/dimensions are required as well, typically via ipc.
 
 #### The alttabway window doesn't show up
 
-Try switching the rendering backend from vulkan to gl in `wgpu_wrapper.rs`.
+Try switching the rendering backend to `Vulkan` or `Gl` in the configuration.
+
+#### Compile fails with "try setting PKG_CONFIG_PATH to the directory containing wayland-client.pc/xkbcommon.pc"
+
+Some required dependencies are missing. On debian based distros, run `apt install libwayland-dev libxkbcommon-dev`

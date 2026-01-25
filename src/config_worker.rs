@@ -63,7 +63,7 @@ impl ConfigHandle {
     fn get_existing_config() -> anyhow::Result<(Config, PathBuf)> {
         let config_dir = Self::get_config_dir().context("Config file location could not be determined (requires XDG_CONFIG_HOME or HOME env variable to be set)")?;
 
-        let config_file = Path::new(&config_dir).join("config.toml");
+        let config_file = Path::new(&config_dir).join("alttabway.toml");
 
         if !config_file.exists() {
             let _ = fs::create_dir_all(config_dir);
