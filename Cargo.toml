@@ -27,3 +27,4 @@ futures-util = { version = "0.3.31", features = ["sink"] }
 fast_image_resize = "6.0.0"
 toml = "0.9.11"
 notify = "8.2.0"
+egui_software_backend = { version = "0.0.1", default-features = false, features = ["std"] }

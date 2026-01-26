@@ -14,14 +14,15 @@ pub enum RenderBackend {
     Default,
     Vulkan,
     Gl,
+    Software,
 }
 
 impl Into<Backends> for RenderBackend {
     fn into(self) -> Backends {
         match self {
-            RenderBackend::Default => Backends::default(),
             RenderBackend::Gl => Backends::GL,
             RenderBackend::Vulkan => Backends::VULKAN,
+            _ => Backends::default(),
         }
     }
 }
@@ -35,7 +36,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            render_backend: RenderBackend::Vulkan,
+            render_backend: RenderBackend::Default,
         }
     }
 }

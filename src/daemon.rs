@@ -1,50 +1,36 @@
 use std::{mem, time::Duration};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use smithay_client_toolkit::reexports::client::EventQueue;
 use tokio::{
     io::unix::AsyncFd,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::{
-    config_worker::ConfigHandle,
+    config_worker::{ConfigHandle, RenderBackend},
     geometry_worker::{GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
     ipc::{AlttabwayIpc, Direction, IpcCommand, Modifier},
+    renderer::{Renderer, SoftwareRenderer, WgpuRenderer},
     timer::Timer,
     wayland_client::WaylandClient,
     wayland_client_event::WaylandClientEvent,
-    wgpu_wrapper::{WgpuSurface, WgpuWrapper},
 };
 
 use fast_image_resize::{PixelType, Resizer, images::Image};
 
-#[derive(Debug)]
-pub enum MaybeWgpuWrapper {
-    Uninitialized,
-    Initializing,
-    Initialized(WgpuWrapper),
-}
-
-#[derive(Debug)]
-enum DaemonEvent {
-    WgpuSurface(WgpuWrapper, anyhow::Result<WgpuSurface>),
-}
-
-#[derive(Debug)]
 pub struct Daemon {
     height: u32,
     width: u32,
-    wgpu: Option<WgpuWrapper>,
-    wgpu_surface: Option<WgpuSurface>,
+    renderer: Box<dyn Renderer>,
     wayland_client: WaylandClient,
     wayland_client_q: EventQueue<WaylandClient>,
     wayland_client_rx: UnboundedReceiver<WaylandClientEvent>,
 
-    command_tx: UnboundedSender<DaemonEvent>,
-    command_rx: UnboundedReceiver<DaemonEvent>,
+    renderer_tx: UnboundedSender<()>,
+    renderer_rx: UnboundedReceiver<()>,
     gui: Gui,
     pending_repaint: bool,
 
@@ -68,24 +54,26 @@ impl Daemon {
         let config_handle = ConfigHandle::new();
         let geometry_worker = GeometryWorker::new()?;
 
-        let wgpu_wrapper = WgpuWrapper::init(config_handle.get().render_backend).await?;
-
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
 
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (renderer_tx, renderer_rx) = mpsc::unbounded_channel();
+
+        let renderer: Box<dyn Renderer> = match config_handle.get().render_backend {
+            RenderBackend::Software => Box::new(SoftwareRenderer::new()),
+            backends => Box::new(WgpuRenderer::new(backends).await?),
+        };
 
         debug!("Initialized wayland layer client");
 
         let mut daemon = Self {
             height: 400,
             width: 800,
-            wgpu: Some(wgpu_wrapper),
-            wgpu_surface: None,
+            renderer,
             wayland_client,
             wayland_client_q,
             wayland_client_rx,
-            command_tx,
-            command_rx,
+            renderer_tx,
+            renderer_rx,
             gui: Default::default(),
             pending_repaint: false,
             geometry_worker,
@@ -126,23 +114,14 @@ impl Daemon {
                     match event {
                         WaylandClientEvent::LayerShellConfigure(configure) => {
                             let (width, height) = configure.new_size;
-                            let width = if width == 0 { self.width } else { width };
-                            let height = if height == 0 { self.height } else { height };
+                            self.width = if width == 0 { self.width } else { width };
+                            self.height = if height == 0 { self.height } else { height };
 
-                            if !self.visible || !self.wayland_client.has_surfaces() || self.wgpu_surface.is_some() {
+                            if !self.visible || !self.wayland_client.has_surfaces() {
                                 continue;
                             }
 
-                            if let Some(mut wgpu) = self.wgpu.take() {
-                                let raw_handles = self.wayland_client.get_raw_handles()?;
-                                let command_tx = self.command_tx.clone();
-
-
-                                tokio::spawn(async move {
-                                    let wgpu_surface = wgpu.init_surface(raw_handles, width, height);
-                                    command_tx.send(DaemonEvent::WgpuSurface(wgpu, wgpu_surface)).unwrap();
-                                });
-                            }
+                            self.renderer.init_surface(&mut self.wayland_client, self.width, self.height, self.renderer_tx.clone())?;
                         }
                         WaylandClientEvent::Egui(events) => {
                             self.gui.handle_events(events);
@@ -212,29 +191,8 @@ impl Daemon {
                         }
                     }
                 },
-                Some(event) = self.command_rx.recv() => {
-                    trace!("received daemon event {:?}", event);
-
-                    match event {
-                        DaemonEvent::WgpuSurface(wgpu, wgpu_surface_result) => {
-                            tracing::trace!("WGPU SURFACE RECEIVED!");
-                            self.wgpu = wgpu.into();
-
-                            match wgpu_surface_result {
-                                Ok(wgpu_surface) => {
-                                    self.width = wgpu_surface.surface_config.width;
-                                    self.height = wgpu_surface.surface_config.height;
-                                    self.wgpu_surface = Some(wgpu_surface);
-                                    if self.visible {
-                                        self.paint()?;
-                                    } else {
-                                        self.update_visibility(false)?;
-                                    }
-                                }
-                                Err(err) => bail!(err)
-                            }
-                        }
-                    }
+                Some(()) = self.renderer_rx.recv() => {
+                    self.paint()?
                 }
                 result = self.geometry_worker.recv() => {
                     let event = result.context("geometry worker has crashed")?;
@@ -335,11 +293,7 @@ impl Daemon {
             )?;
             tracing::trace!("SURFACES CREATED");
         } else {
-            // we can't drop surfaces right now
-            if self.wgpu.is_none() {
-                return Ok(());
-            }
-            self.wgpu_surface.take();
+            self.renderer.destroy_surface(&mut self.wayland_client)?;
             self.wayland_client.destroy_surfaces();
         }
 
@@ -349,25 +303,20 @@ impl Daemon {
     fn paint(&mut self) -> anyhow::Result<()> {
         self.pending_repaint = false;
 
-        if let (Some(wgpu), Some(wgpu_surface)) = (&mut self.wgpu, &mut self.wgpu_surface) {
-            tracing::trace!("PAINT COMPLETE");
-            self.gui.paint(wgpu, wgpu_surface)?;
+        tracing::trace!("PAINT COMPLETE");
+        self.renderer
+            .render(&mut self.wayland_client, &mut self.gui)?;
 
-            // Update cursor icon
-            use smithay_client_toolkit::seat::pointer::CursorIcon;
-            match self.gui.get_cursor_icon() {
-                egui::CursorIcon::Default => {
-                    self.wayland_client.request_cursor(CursorIcon::Default)
-                }
-                egui::CursorIcon::PointingHand => {
-                    self.wayland_client.request_cursor(CursorIcon::Pointer)
-                }
-                _ => (),
+        // Update cursor icon
+        use smithay_client_toolkit::seat::pointer::CursorIcon;
+        match self.gui.get_cursor_icon() {
+            egui::CursorIcon::Default => self.wayland_client.request_cursor(CursorIcon::Default),
+            egui::CursorIcon::PointingHand => {
+                self.wayland_client.request_cursor(CursorIcon::Pointer)
             }
-
-            return Ok(());
+            _ => (),
         }
-        warn!("paint requested but no surface?????");
-        Ok(())
+
+        return Ok(());
     }
 }

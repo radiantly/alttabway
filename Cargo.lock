@@ -38,6 +38,7 @@ dependencies = [
  "clap",
  "egui",
  "egui-wgpu",
+ "egui_software_backend",
  "fast_image_resize",
  "futures-util",
  "notify",
@@ -349,6 +350,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "constify"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3efe35846d8965e78e0e246153416055964610dc2b67ba0e162624dc44fc719"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -462,6 +474,17 @@ dependencies = [
  "type-map",
  "web-time",
  "wgpu",
+]
+
+[[package]]
+name = "egui_software_backend"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18febd6d6d8c7b5672956503fe110907beefed94d49b046d9645fa8c39a94b4a"
+dependencies = [
+ "constify",
+ "egui",
+ "strength_reduce",
 ]
 
 [[package]]
@@ -1508,6 +1531,12 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "strength_reduce"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe895eb47f22e2ddd4dabc02bce419d2e643c8e3b585c78158b349195bc24d82"
 
 [[package]]
 name = "strsim"

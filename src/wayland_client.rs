@@ -253,6 +253,35 @@ impl WaylandClient {
         Ok(())
     }
 
+    pub fn create_buffer(&mut self, width: i32, height: i32) -> anyhow::Result<Buffer> {
+        let (buffer, _) =
+            self.screencopy_pool
+                .create_buffer(width, height, width * 4, Format::Argb8888)?;
+        Ok(buffer)
+    }
+
+    pub fn update_surface_buffer(
+        &mut self,
+        buffer: &mut Buffer,
+        handle_pixels: impl FnOnce(&mut [u8]),
+    ) {
+        let Some(Surfaces { wl_surface, .. }) = &mut self.surfaces else {
+            tracing::warn!("No active surface");
+            return;
+        };
+
+        let Some(pixels) = buffer.canvas(&mut self.screencopy_pool) else {
+            tracing::error!("Could not find buffer in pool?????");
+            return;
+        };
+
+        handle_pixels(pixels);
+
+        wl_surface.attach(Some(buffer.wl_buffer()), 0, 0);
+        wl_surface.damage_buffer(0, 0, buffer.stride() / 4, buffer.height());
+        wl_surface.commit();
+    }
+
     pub fn has_surfaces(&self) -> bool {
         self.surfaces.is_some()
     }

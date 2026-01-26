@@ -6,7 +6,7 @@ pub mod geometry_worker;
 pub mod gui;
 pub mod gui_state;
 pub mod ipc;
+pub mod renderer;
 pub mod timer;
 pub mod wayland_client;
 pub mod wayland_client_event;
-pub mod wgpu_wrapper;
