@@ -19,7 +19,10 @@ use crate::{
     wayland_client_event::WaylandClientEvent,
 };
 
-use fast_image_resize::{PixelType, Resizer, images::Image};
+use fast_image_resize::{
+    PixelType, Resizer,
+    images::{Image, ImageRef},
+};
 
 pub struct Daemon {
     height: u32,
@@ -31,6 +34,10 @@ pub struct Daemon {
 
     renderer_tx: UnboundedSender<()>,
     renderer_rx: UnboundedReceiver<()>,
+
+    resizer_tx: UnboundedSender<(u32, Image<'static>)>,
+    resizer_rx: UnboundedReceiver<(u32, Image<'static>)>,
+
     gui: Gui,
     pending_repaint: bool,
 
@@ -57,6 +64,7 @@ impl Daemon {
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
 
         let (renderer_tx, renderer_rx) = mpsc::unbounded_channel();
+        let (resizer_tx, resizer_rx) = mpsc::unbounded_channel();
 
         let renderer: Box<dyn Renderer> = match config_handle.get().render_backend {
             RenderBackend::Software => Box::new(SoftwareRenderer::new()),
@@ -74,6 +82,8 @@ impl Daemon {
             wayland_client_rx,
             renderer_tx,
             renderer_rx,
+            resizer_tx,
+            resizer_rx,
             gui: Default::default(),
             pending_repaint: false,
             geometry_worker,
@@ -161,38 +171,49 @@ impl Daemon {
                         WaylandClientEvent::TopLevelAppIdUpdate(id, new_app_id) => self.gui.update_item_app_id(id, new_app_id),
                         WaylandClientEvent::TopLevelRemoved(id) => self.gui.remove_item(id),
                         WaylandClientEvent::ScreencopyDone(id, buffer) => {
-                            // TODO: Resizing takes time, especially on slower computers
                             let _span = tracing::trace_span!("Resize", id=id).entered();
                             tracing::trace!("start");
 
-                            let canvas = buffer
-                                .canvas(self.wayland_client.get_screencopy_pool())
-                                .context("missing canvas????")?;
+                            // TODO: Zero-copy is technically possible with unsafe ... or reimplementing the pool to allow multithreaded access
+
+                            let mut pixels = self.wayland_client.get_buffer_mut(&buffer, |slice| slice.to_vec());
 
                             let (width, height) = ((buffer.stride() / 4) as u32, buffer.height() as u32);
                             let (preview_width, preview_height) = self.gui.calculate_preview_size((width, height));
+                            let resizer_tx = self.resizer_tx.clone();
+                            tokio::spawn(async move {
+                                let src_image = match ImageRef::new(width, height, &mut pixels, PixelType::U8x4) {
+                                    Ok(image_ref) => image_ref,
+                                    Err(err) => {
+                                        tracing::warn!("Failed to read screencopy bytes as image: {}", err);
+                                        return;
+                                    }
+                                };
+                                let mut dst_image = Image::new(preview_width, preview_height, PixelType::U8x4);
 
-                            let mut dst_image = Image::new(preview_width, preview_height, PixelType::U8x4);
-                            let src_image = Image::from_slice_u8(width, height, canvas, PixelType::U8x4)?;
-                            let mut resizer = Resizer::new();
-                            resizer.resize(&src_image, &mut dst_image, None)?;
-                            tracing::trace!("resized");
+                                tracing::trace!("attempting to resize image! {}x{} => {}x{}", width, height, preview_width, preview_height);
 
-                            let rgba = {
-                                let mut bgra = dst_image.into_vec();
-                                for chunk in bgra.chunks_exact_mut(4) {
+                                let mut resizer = Resizer::new();
+                                if let Err(err) = resizer.resize(&src_image, &mut dst_image, None) {
+                                    tracing::warn!("failed to resize image! {}", err);
+                                    return;
+                                }
+
+                                for chunk in dst_image.buffer_mut().chunks_exact_mut(4) {
                                     chunk.swap(0, 2);
                                 }
-                                bgra
-                            };
 
-                            self.gui.update_item_preview(id, &rgba, preview_width);
-                            tracing::trace!("completed");
+                                let _ = resizer_tx.send((id, dst_image));
+                            });
+
                         }
                     }
                 },
                 Some(()) = self.renderer_rx.recv() => {
                     self.paint()?
+                }
+                Some((id, preview_image)) = self.resizer_rx.recv() => {
+                    self.gui.update_item_preview(id, preview_image.buffer(), preview_image.width());
                 }
                 result = self.geometry_worker.recv() => {
                     let event = result.context("geometry worker has crashed")?;

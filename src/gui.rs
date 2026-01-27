@@ -22,8 +22,10 @@ impl Debug for Gui {
 
 impl Default for Gui {
     fn default() -> Self {
+        let context = Context::default();
+        context.style_mut(|style| style.visuals.override_text_color = Some(Color32::WHITE));
         Self {
-            egui_ctx: Context::default(),
+            egui_ctx: context,
             state: Default::default(),
             cursor_icon: CursorIcon::Default,
         }
@@ -120,7 +122,7 @@ impl Gui {
 
         let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
             let panel_frame = egui::Frame::new()
-                .fill(egui::Color32::from_rgba_unmultiplied(25, 25, 25, 230))
+                .fill(layout.params.window_background)
                 .corner_radius(layout.params.window_corner_radius);
 
             egui::CentralPanel::default()

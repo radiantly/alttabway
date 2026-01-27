@@ -345,7 +345,7 @@ impl Renderer for SoftwareRenderer {
         let (textures_delta, clipped_primitives) =
             gui.get_output(self.width as f32, self.height as f32);
 
-        wayland_client.update_surface_buffer(buffer, |pixels| {
+        wayland_client.get_buffer_mut(buffer, |pixels| {
             let (pixelbuf, _): (&mut [[u8; 4]], &mut [u8]) = pixels.as_chunks_mut();
             let mut buffer_ref =
                 BufferMutRef::new(pixelbuf, self.width as usize, self.height as usize);
@@ -353,6 +353,8 @@ impl Renderer for SoftwareRenderer {
             self.sw_render
                 .render(&mut buffer_ref, &clipped_primitives, &textures_delta, 1.0);
         });
+
+        wayland_client.update_surface_buffer(buffer);
         tracing::info!("render complete!!");
         Ok(())
     }

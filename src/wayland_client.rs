@@ -121,10 +121,10 @@ pub struct WaylandClient {
     wl_tx: UnboundedSender<WaylandClientEvent>,
     modifiers: Modifiers,
     toplevel_windows: Vec<ZwlrForeignToplevelHandleV1>,
+    pool: SlotPool,
 
     screencopy_manager: ZwlrScreencopyManagerV1,
     screencopy_frames: HashMap<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
-    screencopy_pool: SlotPool,
 
     themed_pointer: Option<ThemedPointer>,
     current_cursor: Option<CursorIcon>,
@@ -165,7 +165,7 @@ impl WaylandClient {
         let shm = Shm::bind(&globals, &qh)?;
 
         // TODO: dynamic resizing
-        let screencopy_pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
+        let pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
 
         let wayland_app = Self {
             registry_state: RegistryState::new(&globals),
@@ -181,7 +181,7 @@ impl WaylandClient {
             toplevel_windows: Vec::new(),
             screencopy_manager,
             screencopy_frames: HashMap::new(),
-            screencopy_pool,
+            pool,
 
             themed_pointer: None,
             current_cursor: None,
@@ -213,10 +213,6 @@ impl WaylandClient {
         {
             self.set_cursor();
         }
-    }
-
-    pub fn get_screencopy_pool(&mut self) -> &mut SlotPool {
-        &mut self.screencopy_pool
     }
 
     pub fn create_surfaces(
@@ -254,28 +250,27 @@ impl WaylandClient {
     }
 
     pub fn create_buffer(&mut self, width: i32, height: i32) -> anyhow::Result<Buffer> {
-        let (buffer, _) =
-            self.screencopy_pool
-                .create_buffer(width, height, width * 4, Format::Argb8888)?;
+        let (buffer, _) = self
+            .pool
+            .create_buffer(width, height, width * 4, Format::Argb8888)?;
         Ok(buffer)
     }
 
-    pub fn update_surface_buffer(
+    pub fn get_buffer_mut<T>(
         &mut self,
-        buffer: &mut Buffer,
-        handle_pixels: impl FnOnce(&mut [u8]),
-    ) {
+        buffer: &Buffer,
+        handle_buffer: impl FnOnce(&mut [u8]) -> T,
+    ) -> T {
+        let canvas = buffer.canvas(&mut self.pool).unwrap();
+
+        handle_buffer(canvas)
+    }
+
+    pub fn update_surface_buffer(&mut self, buffer: &Buffer) {
         let Some(Surfaces { wl_surface, .. }) = &mut self.surfaces else {
             tracing::warn!("No active surface");
             return;
         };
-
-        let Some(pixels) = buffer.canvas(&mut self.screencopy_pool) else {
-            tracing::error!("Could not find buffer in pool?????");
-            return;
-        };
-
-        handle_pixels(pixels);
 
         wl_surface.attach(Some(buffer.wl_buffer()), 0, 0);
         wl_surface.damage_buffer(0, 0, buffer.stride() / 4, buffer.height());
@@ -712,9 +707,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
 
                 tracing::debug!("wsh {:?}:{:?}:{:?}", width, stride, height);
 
-                let Ok((buffer, _)) = state
-                    .screencopy_pool
-                    .create_buffer(width, height, stride, format)
+                let Ok((buffer, _)) = state.pool.create_buffer(width, height, stride, format)
                 else {
                     tracing::error!("could not create buffer from pool!");
                     state.screencopy_frames.remove(frame);
@@ -743,7 +736,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                         .buffer
                         .as_ref()
                         .unwrap()
-                        .canvas(&mut state.screencopy_pool)
+                        .canvas(&mut state.pool)
                         .context("missing")
                         .unwrap()[0..4]
                 );
