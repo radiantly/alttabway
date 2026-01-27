@@ -320,13 +320,13 @@ impl Renderer for SoftwareRenderer {
         height: u32,
         request_paint: UnboundedSender<()>,
     ) -> anyhow::Result<()> {
-        tracing::info!("creating buffer");
+        tracing::debug!("creating buffer");
         self.width = width as i32;
         self.height = height as i32;
         self.buffer = wayland_client
             .create_buffer(self.width, self.height)?
             .into();
-        tracing::info!("created buffer");
+        tracing::debug!("created buffer");
         request_paint.send(())?;
         Ok(())
     }
@@ -337,7 +337,7 @@ impl Renderer for SoftwareRenderer {
     }
 
     fn render(&mut self, wayland_client: &mut WaylandClient, gui: &mut Gui) -> anyhow::Result<()> {
-        tracing::info!("render requested!!");
+        tracing::trace!("render requested!!");
         let Some(buffer) = &mut self.buffer else {
             bail!("missing buffer????");
         };
@@ -346,6 +346,9 @@ impl Renderer for SoftwareRenderer {
             gui.get_output(self.width as f32, self.height as f32);
 
         wayland_client.get_buffer_mut(buffer, |pixels| {
+            // Transparency is not handled correctly if we do not reset the buffer
+            pixels.fill(0);
+
             let (pixelbuf, _): (&mut [[u8; 4]], &mut [u8]) = pixels.as_chunks_mut();
             let mut buffer_ref =
                 BufferMutRef::new(pixelbuf, self.width as usize, self.height as usize);
@@ -355,7 +358,7 @@ impl Renderer for SoftwareRenderer {
         });
 
         wayland_client.update_surface_buffer(buffer);
-        tracing::info!("render complete!!");
+        tracing::trace!("render complete!!");
         Ok(())
     }
 }

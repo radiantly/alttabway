@@ -66,6 +66,11 @@ impl ConfigHandle {
 
         let config_file = Path::new(&config_dir).join("alttabway.toml");
 
+        let old_config_file = Path::new(&config_dir).join("config.toml");
+        if old_config_file.exists() {
+            let _ = fs::remove_file(old_config_file);
+        }
+
         if !config_file.exists() {
             let _ = fs::create_dir_all(config_dir);
             let config = Config::default();

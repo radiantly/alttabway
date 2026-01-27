@@ -213,7 +213,9 @@ impl Daemon {
                     self.paint()?
                 }
                 Some((id, preview_image)) = self.resizer_rx.recv() => {
-                    self.gui.update_item_preview(id, preview_image.buffer(), preview_image.width());
+                    if !self.visible {
+                        self.gui.update_item_preview(id, preview_image.buffer(), preview_image.width());
+                    }
                 }
                 result = self.geometry_worker.recv() => {
                     let event = result.context("geometry worker has crashed")?;
