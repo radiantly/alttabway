@@ -292,8 +292,6 @@ impl Renderer for WgpuRenderer {
 }
 
 pub struct SoftwareRenderer {
-    width: i32,
-    height: i32,
     buffer: Option<Buffer>,
     sw_render: EguiSoftwareRender,
 }
@@ -304,8 +302,6 @@ impl SoftwareRenderer {
 
         Self {
             buffer: None,
-            width: 0,
-            height: 0,
             sw_render,
         }
     }
@@ -321,10 +317,8 @@ impl Renderer for SoftwareRenderer {
         request_paint: UnboundedSender<()>,
     ) -> anyhow::Result<()> {
         tracing::debug!("creating buffer");
-        self.width = width as i32;
-        self.height = height as i32;
         self.buffer = wayland_client
-            .create_buffer(self.width, self.height)?
+            .create_buffer(width as i32, height as i32)?
             .into();
         tracing::debug!("created buffer");
         request_paint.send(())?;
@@ -342,16 +336,15 @@ impl Renderer for SoftwareRenderer {
             bail!("missing buffer????");
         };
 
-        let (textures_delta, clipped_primitives) =
-            gui.get_output(self.width as f32, self.height as f32);
+        let (width, height) = (buffer.stride() / 4, buffer.height());
+        let (textures_delta, clipped_primitives) = gui.get_output(width as f32, height as f32);
 
         wayland_client.get_buffer_mut(buffer, |pixels| {
             // Transparency is not handled correctly if we do not reset the buffer
             pixels.fill(0);
 
             let (pixelbuf, _): (&mut [[u8; 4]], &mut [u8]) = pixels.as_chunks_mut();
-            let mut buffer_ref =
-                BufferMutRef::new(pixelbuf, self.width as usize, self.height as usize);
+            let mut buffer_ref = BufferMutRef::new(pixelbuf, width as usize, height as usize);
 
             self.sw_render
                 .render(&mut buffer_ref, &clipped_primitives, &textures_delta, 1.0);

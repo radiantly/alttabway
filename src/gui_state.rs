@@ -76,13 +76,13 @@ impl Default for LayoutParams {
     fn default() -> Self {
         Self {
             window_max_width: 800,
-            window_corner_radius: 8.0,
+            window_corner_radius: 6.0,
             window_padding: 10,
-            window_background: hex_color!("#202020ee"),
+            window_background: hex_color!("#20202044"),
             items_gap: 10,
             item_stroke: 0,
             item_padding: 7,
-            item_corner_radius: 5.0,
+            item_corner_radius: 6.0,
             item_hover_background: hex_color!("#11111144"),
             item_active_background: hex_color!("#11111177"),
             title_height: 25,

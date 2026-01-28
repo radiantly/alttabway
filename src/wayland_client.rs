@@ -325,11 +325,12 @@ impl WaylandClient {
             return;
         };
 
-        let Some(seat) = &self.seat_state.seats().next() else {
-            return;
+        let seat_count = self.seat_state.seats().count();
+        tracing::debug!("activating window {}, seat count {}", id, seat_count);
+
+        if let Some(seat) = &self.seat_state.seats().next() {
+            window_handle.activate(seat);
         };
-        tracing::trace!("activating window {}", id);
-        window_handle.activate(seat);
     }
 
     pub fn capture_window_region(
@@ -705,7 +706,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                     return;
                 };
 
-                tracing::debug!("wsh {:?}:{:?}:{:?}", width, stride, height);
+                tracing::debug!("widthxheight (stride) {}x{} ({})", width, height, stride);
 
                 let Ok((buffer, _)) = state.pool.create_buffer(width, height, stride, format)
                 else {

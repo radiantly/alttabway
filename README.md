@@ -18,16 +18,19 @@ alttabway is now installed! Follow compositor specific instructions to start the
 
   Add the following lines to your `~/.config/hypr/hyprland.conf`
 
-  ```
+  ```toml
   exec-once = alttabway daemon &
   binde = ALT, Tab, exec, alttabway show --next
   binde = ALT SHIFT, Tab, exec, alttabway show --previous
+
+  # Optional - set this if you have blur enabled on Hyprland
+  layerrule = blur on, ignore_alpha 0, match:namespace ^alttabway$
   ```
 
   <details>
   <summary>Configuration options</summary>
 
-  ```
+  ```toml
   # Activate using Ctrl+Super+Tab
   binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
   binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super
@@ -59,7 +62,7 @@ alttabway only provides support for Hyprland (Sway and Niri coming in the near f
 
 #### The alttabway window doesn't show up
 
-Try switching the rendering backend to `Vulkan` or `Gl` in the configuration.
+Try setting `render_backend` to `Vulkan`, `Gl` or `Software` in the configuration.
 
 #### Compile fails with "try setting PKG_CONFIG_PATH to the directory containing wayland-client.pc/xkbcommon.pc"
 

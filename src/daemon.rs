@@ -12,16 +12,12 @@ use crate::{
     config_worker::{ConfigHandle, RenderBackend},
     geometry_worker::{GeometryWorker, GeometryWorkerEvent},
     gui::Gui,
+    image_resizer::ImageResizer,
     ipc::{AlttabwayIpc, Direction, IpcCommand, Modifier},
     renderer::{Renderer, SoftwareRenderer, WgpuRenderer},
     timer::Timer,
     wayland_client::WaylandClient,
     wayland_client_event::WaylandClientEvent,
-};
-
-use fast_image_resize::{
-    PixelType, Resizer,
-    images::{Image, ImageRef},
 };
 
 pub struct Daemon {
@@ -35,8 +31,7 @@ pub struct Daemon {
     renderer_tx: UnboundedSender<()>,
     renderer_rx: UnboundedReceiver<()>,
 
-    resizer_tx: UnboundedSender<(u32, Image<'static>)>,
-    resizer_rx: UnboundedReceiver<(u32, Image<'static>)>,
+    preview_resizer: ImageResizer<u32>,
 
     gui: Gui,
     pending_repaint: bool,
@@ -64,8 +59,8 @@ impl Daemon {
         let (wayland_client, wayland_client_q, wayland_client_rx) = WaylandClient::init()?;
 
         let (renderer_tx, renderer_rx) = mpsc::unbounded_channel();
-        let (resizer_tx, resizer_rx) = mpsc::unbounded_channel();
 
+        let preview_resizer = ImageResizer::new();
         let renderer: Box<dyn Renderer> = match config_handle.get().render_backend {
             RenderBackend::Software => Box::new(SoftwareRenderer::new()),
             backends => Box::new(WgpuRenderer::new(backends).await?),
@@ -82,8 +77,7 @@ impl Daemon {
             wayland_client_rx,
             renderer_tx,
             renderer_rx,
-            resizer_tx,
-            resizer_rx,
+            preview_resizer,
             gui: Default::default(),
             pending_repaint: false,
             geometry_worker,
@@ -175,44 +169,17 @@ impl Daemon {
                             tracing::trace!("start");
 
                             // TODO: Zero-copy is technically possible with unsafe ... or reimplementing the pool to allow multithreaded access
-
-                            let mut pixels = self.wayland_client.get_buffer_mut(&buffer, |slice| slice.to_vec());
+                            let pixels = self.wayland_client.get_buffer_mut(&buffer, |slice| slice.to_vec());
 
                             let (width, height) = ((buffer.stride() / 4) as u32, buffer.height() as u32);
-                            let (preview_width, preview_height) = self.gui.calculate_preview_size((width, height));
-                            let resizer_tx = self.resizer_tx.clone();
-                            tokio::spawn(async move {
-                                let src_image = match ImageRef::new(width, height, &mut pixels, PixelType::U8x4) {
-                                    Ok(image_ref) => image_ref,
-                                    Err(err) => {
-                                        tracing::warn!("Failed to read screencopy bytes as image: {}", err);
-                                        return;
-                                    }
-                                };
-                                let mut dst_image = Image::new(preview_width, preview_height, PixelType::U8x4);
-
-                                tracing::trace!("attempting to resize image! {}x{} => {}x{}", width, height, preview_width, preview_height);
-
-                                let mut resizer = Resizer::new();
-                                if let Err(err) = resizer.resize(&src_image, &mut dst_image, None) {
-                                    tracing::warn!("failed to resize image! {}", err);
-                                    return;
-                                }
-
-                                for chunk in dst_image.buffer_mut().chunks_exact_mut(4) {
-                                    chunk.swap(0, 2);
-                                }
-
-                                let _ = resizer_tx.send((id, dst_image));
-                            });
-
+                            self.preview_resizer.resize_bgra_pixels(id, (pixels, width), self.gui.calculate_preview_size((width, height)));
                         }
                     }
                 },
                 Some(()) = self.renderer_rx.recv() => {
                     self.paint()?
                 }
-                Some((id, preview_image)) = self.resizer_rx.recv() => {
+                Some((id, preview_image)) = self.preview_resizer.recv() => {
                     if !self.visible {
                         self.gui.update_item_preview(id, preview_image.buffer(), preview_image.width());
                     }
