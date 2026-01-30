@@ -22,6 +22,10 @@ impl Item {
         &self.preview
     }
 
+    pub fn get_app_id(&self) -> &str {
+        &self.app_id
+    }
+
     pub fn get_title(&self) -> Cow<'_, str> {
         if self.app_id.is_empty() {
             if self.title.is_empty() {

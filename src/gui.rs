@@ -1,17 +1,21 @@
 use std::fmt::Debug;
 
+use crate::{gui_state::GuiState, icon_helper::IconWorker, image_resizer::ImageResizer};
 use egui::{
-    Align, ClippedPrimitive, Color32, Context, CursorIcon, Event, Frame, FullOutput, Image, Label,
-    Layout, RawInput, Stroke, TexturesDelta, UiBuilder,
+    Align, ClippedPrimitive, Color32, ColorImage, Context, CursorIcon, Event, Frame, FullOutput,
+    Image, Label, Layout, RawInput, Stroke, TextureHandle, TexturesDelta, UiBuilder,
+    ahash::{HashMap, HashMapExt},
 };
-
-use crate::gui_state::GuiState;
 
 pub struct Gui {
     egui_ctx: Context,
 
     state: GuiState,
     cursor_icon: CursorIcon,
+    icons: HashMap<String, TextureHandle>,
+
+    icon_resizer: ImageResizer<String>,
+    icon_worker: IconWorker,
 }
 
 impl Debug for Gui {
@@ -28,6 +32,9 @@ impl Default for Gui {
             egui_ctx: context,
             state: Default::default(),
             cursor_icon: CursorIcon::Default,
+            icons: HashMap::new(),
+            icon_resizer: ImageResizer::new(),
+            icon_worker: IconWorker::new(),
         }
     }
 }
@@ -35,6 +42,23 @@ impl Default for Gui {
 impl Gui {
     pub fn new() -> Self {
         Gui::default()
+    }
+
+    pub async fn recv(&mut self) -> Option<()> {
+        tokio::select! {
+            Some((app_id, icon_image)) = self.icon_worker.recv() => {
+                self.icon_resizer.resize_image(app_id, icon_image, (16, 16));
+            }
+            Some((app_id, icon_image)) = self.icon_resizer.recv() => {
+                let image_size = [icon_image.width() as usize, icon_image.height() as usize];
+                let color_image = ColorImage::from_rgba_unmultiplied(image_size, icon_image.buffer());
+
+                let texture_handle = self.egui_ctx
+                    .load_texture(&app_id, color_image, Default::default());
+                self.icons.insert(app_id, texture_handle);
+            }
+        };
+        Some(())
     }
 
     pub fn add_item(&mut self, id: u32) {
@@ -45,6 +69,9 @@ impl Gui {
         self.state.update_item_title(id, new_title);
     }
     pub fn update_item_app_id(&mut self, id: u32, new_app_id: String) {
+        if !self.icons.contains_key(&new_app_id) {
+            self.icon_worker.get_icon(&new_app_id);
+        }
         self.state.update_item_app_id(id, new_app_id);
     }
     pub fn signal_item_activation(&mut self, id: u32) {
@@ -150,7 +177,18 @@ impl Gui {
                             ui.allocate_ui_with_layout(
                                 (ui.available_width(), layout.params.title_height as f32).into(),
                                 Layout::left_to_right(Align::Center),
-                                |ui| ui.add(Label::new(item.get_title()).truncate()),
+                                |ui| {
+                                    if let Some(icon_handle) = self.icons.get(item.get_app_id()) {
+                                        ui.add(
+                                            Image::from_texture((
+                                                icon_handle.id(),
+                                                (16.0, 16.0).into(),
+                                            ))
+                                            .corner_radius(1),
+                                        );
+                                    }
+                                    ui.add(Label::new(item.get_title()).truncate());
+                                },
                             );
                             if let Some((handle, [width, height])) = item.get_preview() {
                                 ui.add(

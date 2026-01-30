@@ -18,7 +18,7 @@ alttabway is now installed! Follow compositor specific instructions to start the
 
   Add the following lines to your `~/.config/hypr/hyprland.conf`
 
-  ```toml
+  ```ini
   exec-once = alttabway daemon &
   binde = ALT, Tab, exec, alttabway show --next
   binde = ALT SHIFT, Tab, exec, alttabway show --previous
@@ -30,7 +30,7 @@ alttabway is now installed! Follow compositor specific instructions to start the
   <details>
   <summary>Configuration options</summary>
 
-  ```toml
+  ```ini
   # Activate using Ctrl+Super+Tab
   binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
   binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super

@@ -5,6 +5,7 @@ pub mod geometry_provider;
 pub mod geometry_worker;
 pub mod gui;
 pub mod gui_state;
+pub mod icon_helper;
 pub mod image_resizer;
 pub mod ipc;
 pub mod renderer;

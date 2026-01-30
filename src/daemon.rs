@@ -242,6 +242,7 @@ impl Daemon {
 
                     self.geometry_worker.request_active_window_geometry(active_window_id)?;
                 }
+                _ = self.gui.recv() => ()
             }
         }
     }
