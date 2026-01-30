@@ -2,7 +2,7 @@
 
 Finally, an alt-tab window switcher with actual window previews. Only Hyprland is supported at the moment.
 
-![Preview](https://cdn.jsdelivr.net/gh/radiantly/alttabway/.github/preview.png)
+![Preview](https://cdn.jsdelivr.net/gh/radiantly/alttabway/.github/preview.webp)
 
 ## Usage
 
