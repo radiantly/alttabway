@@ -1,11 +1,19 @@
 use std::fmt::Debug;
 
-use crate::{gui_state::GuiState, icon_helper::IconWorker, image_resizer::ImageResizer};
+use crate::{
+    config_worker::Config, gui_state::GuiState, icon_helper::IconWorker,
+    image_resizer::ImageResizer,
+};
 use egui::{
     Align, ClippedPrimitive, Color32, ColorImage, Context, CursorIcon, Event, Frame, FullOutput,
-    Image, Label, Layout, RawInput, Stroke, TextureHandle, TexturesDelta, UiBuilder,
+    Image, Label, Layout, RawInput, Sense, Stroke, TextureHandle, TexturesDelta, UiBuilder,
     ahash::{HashMap, HashMapExt},
 };
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+pub enum GuiEvent {
+    ItemClicked(u32),
+}
 
 pub struct Gui {
     egui_ctx: Context,
@@ -16,6 +24,9 @@ pub struct Gui {
 
     icon_resizer: ImageResizer<String>,
     icon_worker: IconWorker,
+
+    event_tx: UnboundedSender<GuiEvent>,
+    event_rx: UnboundedReceiver<GuiEvent>,
 }
 
 impl Debug for Gui {
@@ -26,6 +37,7 @@ impl Debug for Gui {
 
 impl Default for Gui {
     fn default() -> Self {
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
         let context = Context::default();
         context.style_mut(|style| style.visuals.override_text_color = Some(Color32::WHITE));
         Self {
@@ -35,6 +47,8 @@ impl Default for Gui {
             icons: HashMap::new(),
             icon_resizer: ImageResizer::new(),
             icon_worker: IconWorker::new(),
+            event_rx,
+            event_tx,
         }
     }
 }
@@ -44,21 +58,28 @@ impl Gui {
         Gui::default()
     }
 
-    pub async fn recv(&mut self) -> Option<()> {
-        tokio::select! {
-            Some((app_id, icon_image)) = self.icon_worker.recv() => {
-                self.icon_resizer.resize_image(app_id, icon_image, (16, 16));
-            }
-            Some((app_id, icon_image)) = self.icon_resizer.recv() => {
-                let image_size = [icon_image.width() as usize, icon_image.height() as usize];
-                let color_image = ColorImage::from_rgba_unmultiplied(image_size, icon_image.buffer());
+    pub fn update_config(&mut self, config: &Config) {
+        self.state.update_config(config);
+    }
 
-                let texture_handle = self.egui_ctx
-                    .load_texture(&app_id, color_image, Default::default());
-                self.icons.insert(app_id, texture_handle);
-            }
-        };
-        Some(())
+    pub async fn recv(&mut self) -> Option<GuiEvent> {
+        loop {
+            tokio::select! {
+                Some(event) = self.event_rx.recv() => return event.into(),
+                Some((app_id, icon_image)) = self.icon_worker.recv() => {
+                    let icon_size = self.state.get_params().icon_size;
+                    self.icon_resizer.resize_image(app_id, icon_image, (icon_size, icon_size));
+                }
+                Some((app_id, icon_image)) = self.icon_resizer.recv() => {
+                    let image_size = [icon_image.width() as usize, icon_image.height() as usize];
+                    let color_image = ColorImage::from_rgba_unmultiplied(image_size, icon_image.buffer());
+
+                    let texture_handle = self.egui_ctx
+                        .load_texture(&app_id, color_image, Default::default());
+                    self.icons.insert(app_id, texture_handle);
+                }
+            };
+        }
     }
 
     pub fn add_item(&mut self, id: u32) {
@@ -162,7 +183,12 @@ impl Gui {
                         .zip(layout.items)
                         .enumerate()
                     {
-                        let mut frame_ui = ui.new_child(UiBuilder::new().max_rect(*rect));
+                        let mut frame_ui =
+                            ui.new_child(UiBuilder::new().max_rect(*rect).sense(Sense::click()));
+
+                        if frame_ui.response().clicked() {
+                            self.event_tx.send(GuiEvent::ItemClicked(item.id)).unwrap();
+                        }
 
                         let mut frame = Frame::default()
                             .stroke(Stroke::new(
@@ -182,7 +208,11 @@ impl Gui {
                                         ui.add(
                                             Image::from_texture((
                                                 icon_handle.id(),
-                                                (16.0, 16.0).into(),
+                                                (
+                                                    layout.params.icon_size as f32,
+                                                    layout.params.icon_size as f32,
+                                                )
+                                                    .into(),
                                             ))
                                             .corner_radius(1),
                                         );
@@ -204,6 +234,7 @@ impl Gui {
                         }
 
                         let response = frame.allocate_space(&mut frame_ui);
+
                         if response.hovered() {
                             hovered_item_updated = index.into();
                         }

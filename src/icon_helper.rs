@@ -87,7 +87,6 @@ impl IconHelper {
 
     fn get_icon_for_app_id(app_id: &str) -> Option<DynamicImage> {
         for desktop_file in Self::get_desktop_files() {
-            tracing::info!("{:?}", desktop_file);
             let Ok(ini) = Ini::load_from_file(&desktop_file) else {
                 continue;
             };

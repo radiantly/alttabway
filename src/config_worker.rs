@@ -4,10 +4,44 @@ use std::{
 };
 
 use anyhow::Context;
+use egui::{Color32, hex_color};
 use notify::Watcher;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 use wgpu::Backends;
+
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(try_from = "String")]
+pub struct ColorConfig(Color32);
+
+impl Serialize for ColorConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let [r, g, b, a] = self.0.to_array();
+        let hex = format!("#{:02x}{:02x}{:02x}{:02x}", r, g, b, a);
+        serializer.serialize_str(&hex)
+    }
+}
+
+impl TryFrom<String> for ColorConfig {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match Color32::from_hex(&s) {
+            Ok(color) => Ok(ColorConfig(color)),
+            Err(err) => Err(format!("{:?}", err)),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+pub struct WindowConfig {
+    pub padding: u32,
+    pub corner_radius: f32,
+    pub background: ColorConfig,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum RenderBackend {
@@ -31,12 +65,18 @@ impl Into<Backends> for RenderBackend {
 #[serde(default)]
 pub struct Config {
     pub render_backend: RenderBackend,
+    pub window: WindowConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             render_backend: RenderBackend::Default,
+            window: WindowConfig {
+                padding: 10,
+                corner_radius: 6.0,
+                background: ColorConfig(hex_color!("#20202044")),
+            },
         }
     }
 }

@@ -2,9 +2,11 @@ use std::borrow::Cow;
 
 use egui::{Color32, ColorImage, Pos2, Rect, TextureHandle, hex_color};
 
+use crate::config_worker::Config;
+
 #[derive(Default)]
 pub struct Item {
-    id: u32,
+    pub id: u32,
     title: String,
     app_id: String,
     preview: Option<(TextureHandle, [usize; 2])>,
@@ -69,6 +71,7 @@ pub struct LayoutParams {
     pub item_corner_radius: f32,
     pub item_hover_background: Color32,
     pub item_active_background: Color32,
+    pub icon_size: u32,
     pub title_height: u32,
     preview_height: u32,
     preview_min_width: u32,
@@ -89,6 +92,7 @@ impl Default for LayoutParams {
             item_corner_radius: 6.0,
             item_hover_background: hex_color!("#11111144"),
             item_active_background: hex_color!("#11111177"),
+            icon_size: 16,
             title_height: 25,
             preview_height: 100,
             preview_min_width: 100,
@@ -234,6 +238,15 @@ impl GuiState {
             + self.layout_params.preview_height
             + self.layout_params.item_stroke * 2
             + self.layout_params.item_padding * 2
+    }
+
+    pub fn get_params(&self) -> &LayoutParams {
+        &self.layout_params
+    }
+
+    pub fn update_config(&mut self, config: &Config) {
+        self.layout_params.window_corner_radius = config.window.corner_radius;
+        self.layout_params.window_padding = config.window.padding;
     }
 
     // Calculate layout

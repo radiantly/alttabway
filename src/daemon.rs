@@ -11,7 +11,7 @@ use tracing::{debug, trace};
 use crate::{
     config_worker::{ConfigHandle, RenderBackend},
     geometry_worker::{GeometryWorker, GeometryWorkerEvent},
-    gui::Gui,
+    gui::{Gui, GuiEvent},
     image_resizer::ImageResizer,
     ipc::{AlttabwayIpc, Direction, IpcCommand, Modifier},
     renderer::{Renderer, SoftwareRenderer, WgpuRenderer},
@@ -242,7 +242,14 @@ impl Daemon {
 
                     self.geometry_worker.request_active_window_geometry(active_window_id)?;
                 }
-                _ = self.gui.recv() => ()
+                Some(event) = self.gui.recv() => {
+                    match event {
+                        GuiEvent::ItemClicked(window_id) => {
+                            self.wayland_client.activate_window(window_id);
+                            self.update_visibility(false)?;
+                        }
+                    }
+                }
             }
         }
     }
