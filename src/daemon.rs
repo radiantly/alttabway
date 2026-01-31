@@ -143,11 +143,13 @@ impl Daemon {
                                !wl_modifiers.shift && self.required_modifiers.contains(&Modifier::Shift) ||
                                !wl_modifiers.logo && self.required_modifiers.contains(&Modifier::Super)
                             {
-                                if let Some(window_id) = self.gui.get_selected_item_id() {
-                                    self.wayland_client.activate_window(window_id);
-                                }
+                                if self.visible {
+                                    self.update_visibility(false)?;
 
-                                self.update_visibility(false)?;
+                                    if let Some(window_id) = self.gui.get_selected_item_id() {
+                                        self.wayland_client.activate_window(window_id);
+                                    }
+                                }
                             }
                         }
                         WaylandClientEvent::TopLevelAdded(id) => self.gui.add_item(id),
@@ -245,8 +247,10 @@ impl Daemon {
                 Some(event) = self.gui.recv() => {
                     match event {
                         GuiEvent::ItemClicked(window_id) => {
-                            self.wayland_client.activate_window(window_id);
-                            self.update_visibility(false)?;
+                            if self.visible {
+                                self.update_visibility(false)?;
+                                self.wayland_client.activate_window(window_id);
+                            }
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 [package]
 name = "alttabway"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "Alt-tab window switcher for wayland compositors"
 repository = "https://github.com/radiantly/alttabway"
