@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use egui::{Color32, ColorImage, Pos2, Rect, TextureHandle, hex_color};
+use egui::{Color32, ColorImage, Pos2, Rect, TextureHandle};
 
 use crate::config_worker::Config;
 
@@ -65,12 +65,20 @@ pub struct LayoutParams {
     pub window_corner_radius: f32,
     pub window_padding: u32,
     pub window_background: Color32,
-    items_gap: u32,
+    items_horizontal_gap: u32,
+    items_vertical_gap: u32,
     pub item_stroke: u32,
+    pub item_stroke_color: Color32,
+    pub item_hover_stroke_color: Color32,
+    pub item_active_stroke_color: Color32,
     pub item_padding: u32,
     pub item_corner_radius: f32,
+    pub item_background: Color32,
     pub item_hover_background: Color32,
     pub item_active_background: Color32,
+    pub item_horizontal_gap: u32,
+    pub item_vertical_gap: u32,
+    pub item_text_color: Color32,
     pub icon_size: u32,
     pub title_height: u32,
     preview_height: u32,
@@ -79,20 +87,55 @@ pub struct LayoutParams {
     pub preview_corner_radius: f32,
 }
 
+impl LayoutParams {
+    pub fn update_from_config(&mut self, config: &Config) {
+        // WindowConfig
+        self.window_corner_radius = config.window.border_radius;
+        self.window_padding = config.window.padding;
+        self.window_background = config.window.background.into();
+        [self.items_horizontal_gap, self.items_vertical_gap] = config.window.gap;
+
+        // ItemConfig
+        self.item_padding = config.item.padding;
+
+        self.item_corner_radius = config.item.border_radius;
+        self.item_stroke = config.item.border_width;
+        self.item_stroke_color = config.item.border_color.into();
+        self.item_hover_stroke_color = config.item.hover_border_color.into();
+        self.item_active_stroke_color = config.item.active_border_color.into();
+
+        self.item_background = config.item.background.into();
+        self.item_hover_background = config.item.hover_background.into();
+        self.item_active_background = config.item.active_background.into();
+
+        self.icon_size = config.item.icon_size;
+        self.item_text_color = config.item.text_color.into();
+        [self.item_horizontal_gap, self.item_vertical_gap] = config.item.gap;
+    }
+}
+
 impl Default for LayoutParams {
     fn default() -> Self {
         Self {
             window_max_width: 800,
-            window_corner_radius: 6.0,
-            window_padding: 10,
-            window_background: hex_color!("#20202044"),
-            items_gap: 10,
-            item_stroke: 0,
-            item_padding: 7,
-            item_corner_radius: 6.0,
-            item_hover_background: hex_color!("#11111144"),
-            item_active_background: hex_color!("#11111177"),
-            icon_size: 16,
+            window_corner_radius: Default::default(),
+            window_padding: Default::default(),
+            window_background: Default::default(),
+            items_horizontal_gap: Default::default(),
+            items_vertical_gap: Default::default(),
+            item_stroke: Default::default(),
+            item_stroke_color: Default::default(),
+            item_hover_stroke_color: Default::default(),
+            item_active_stroke_color: Default::default(),
+            item_padding: Default::default(),
+            item_corner_radius: Default::default(),
+            item_background: Default::default(),
+            item_hover_background: Default::default(),
+            item_active_background: Default::default(),
+            item_horizontal_gap: Default::default(),
+            item_vertical_gap: Default::default(),
+            item_text_color: Default::default(),
+            icon_size: Default::default(),
             title_height: 25,
             preview_height: 100,
             preview_min_width: 100,
@@ -128,6 +171,10 @@ pub struct GuiState {
 }
 
 impl GuiState {
+    pub fn update_from_config(&mut self, config: &Config) {
+        self.layout_params.update_from_config(config);
+    }
+
     pub fn add_item(&mut self, id: u32) {
         self.items.push(Item::new(id));
     }
@@ -236,17 +283,13 @@ impl GuiState {
     fn get_item_height(&self) -> u32 {
         self.layout_params.title_height
             + self.layout_params.preview_height
+            + self.layout_params.item_vertical_gap
             + self.layout_params.item_stroke * 2
             + self.layout_params.item_padding * 2
     }
 
     pub fn get_params(&self) -> &LayoutParams {
         &self.layout_params
-    }
-
-    pub fn update_config(&mut self, config: &Config) {
-        self.layout_params.window_corner_radius = config.window.corner_radius;
-        self.layout_params.window_padding = config.window.padding;
     }
 
     // Calculate layout
@@ -261,7 +304,7 @@ impl GuiState {
 
         for item in self.items.iter() {
             let item_width = self.get_item_width(item);
-            let needed_width = self.layout_params.items_gap + item_width;
+            let needed_width = self.layout_params.items_horizontal_gap + item_width;
 
             if let Some((row, row_width)) = rows.last_mut()
                 && *row_width + needed_width <= available_row_width
@@ -280,7 +323,7 @@ impl GuiState {
 
         let window_width = longest_row_width + self.layout_params.window_padding * 2;
         let window_height = row_count as u32 * self.get_item_height()
-            + (row_count - 1).max(0) as u32 * self.layout_params.items_gap
+            + (row_count - 1).max(0) as u32 * self.layout_params.items_vertical_gap
             + self.layout_params.window_padding * 2;
 
         let mut item_rects = Vec::new();
@@ -299,10 +342,10 @@ impl GuiState {
                         y: y + row_height,
                     },
                 };
-                x += (item_width + self.layout_params.items_gap) as f32;
+                x += (item_width + self.layout_params.items_horizontal_gap) as f32;
                 item_rects.push(rect);
             }
-            y += row_height + self.layout_params.items_gap as f32;
+            y += row_height + self.layout_params.items_vertical_gap as f32;
         }
 
         self.layout_computed = LayoutComputed {

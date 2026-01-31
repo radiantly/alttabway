@@ -1,12 +1,12 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, sync::Arc};
 
 use crate::{
     config_worker::Config, gui_state::GuiState, icon_helper::IconWorker,
     image_resizer::ImageResizer,
 };
 use egui::{
-    Align, ClippedPrimitive, Color32, ColorImage, Context, CursorIcon, Event, Frame, FullOutput,
-    Image, Label, Layout, RawInput, Sense, Stroke, TextureHandle, TexturesDelta, UiBuilder,
+    Align, ClippedPrimitive, ColorImage, Context, CursorIcon, Event, Frame, FullOutput, Image,
+    Label, Layout, RawInput, Sense, Stroke, Style, TextureHandle, TexturesDelta, UiBuilder,
     ahash::{HashMap, HashMapExt},
 };
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -35,12 +35,12 @@ impl Debug for Gui {
     }
 }
 
-impl Default for Gui {
-    fn default() -> Self {
+impl Gui {
+    pub fn new(config: &Config) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let context = Context::default();
-        context.style_mut(|style| style.visuals.override_text_color = Some(Color32::WHITE));
-        Self {
+
+        let mut gui = Self {
             egui_ctx: context,
             state: Default::default(),
             cursor_icon: CursorIcon::Default,
@@ -49,17 +49,13 @@ impl Default for Gui {
             icon_worker: IconWorker::new(),
             event_rx,
             event_tx,
-        }
-    }
-}
-
-impl Gui {
-    pub fn new() -> Self {
-        Gui::default()
+        };
+        gui.update_from_config(config);
+        gui
     }
 
-    pub fn update_config(&mut self, config: &Config) {
-        self.state.update_config(config);
+    pub fn update_from_config(&mut self, config: &Config) {
+        self.state.update_from_config(config);
     }
 
     pub async fn recv(&mut self) -> Option<GuiEvent> {
@@ -167,6 +163,13 @@ impl Gui {
     fn build_ui(&mut self, raw_input: RawInput) -> FullOutput {
         let layout = self.state.calculate_layout();
         let mut hovered_item_updated = None;
+        let item_style = Arc::new({
+            let mut item_style = Style::default();
+            item_style.visuals.override_text_color = layout.params.item_text_color.into();
+            item_style.spacing.item_spacing.x = layout.params.item_horizontal_gap as f32;
+            item_style.spacing.item_spacing.y = layout.params.item_vertical_gap as f32;
+            item_style
+        });
 
         let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
             let panel_frame = egui::Frame::new()
@@ -183,8 +186,12 @@ impl Gui {
                         .zip(layout.items)
                         .enumerate()
                     {
-                        let mut frame_ui =
-                            ui.new_child(UiBuilder::new().max_rect(*rect).sense(Sense::click()));
+                        let mut frame_ui = ui.new_child(
+                            UiBuilder::new()
+                                .max_rect(*rect)
+                                .sense(Sense::click())
+                                .style(item_style.clone()),
+                        );
 
                         if frame_ui.response().clicked() {
                             self.event_tx.send(GuiEvent::ItemClicked(item.id)).unwrap();
@@ -193,8 +200,9 @@ impl Gui {
                         let mut frame = Frame::default()
                             .stroke(Stroke::new(
                                 layout.params.item_stroke as f32,
-                                Color32::TRANSPARENT,
+                                layout.params.item_stroke_color,
                             ))
+                            .fill(layout.params.item_background)
                             .inner_margin(layout.params.item_padding as f32)
                             .corner_radius(layout.params.item_corner_radius)
                             .begin(&mut frame_ui);
@@ -240,11 +248,12 @@ impl Gui {
                         }
 
                         if layout.selected_item == index {
-                            frame.frame.stroke.color = Color32::WHITE;
+                            frame.frame.stroke.color = layout.params.item_active_stroke_color;
                             frame.frame.fill = layout.params.item_active_background;
                         } else if let Some(hovered_item) = layout.hovered_item
                             && hovered_item == index
                         {
+                            frame.frame.stroke.color = layout.params.item_hover_stroke_color;
                             frame.frame.fill = layout.params.item_hover_background;
                         }
                         frame.paint(&frame_ui);

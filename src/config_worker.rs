@@ -14,6 +14,12 @@ use wgpu::Backends;
 #[serde(try_from = "String")]
 pub struct ColorConfig(Color32);
 
+impl Into<Color32> for ColorConfig {
+    fn into(self) -> Color32 {
+        self.0
+    }
+}
+
 impl Serialize for ColorConfig {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -37,12 +43,66 @@ impl TryFrom<String> for ColorConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
 pub struct WindowConfig {
     pub padding: u32,
-    pub corner_radius: f32,
+    pub border_radius: f32,
     pub background: ColorConfig,
+    pub gap: [u32; 2],
 }
 
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self {
+            padding: 10,
+            border_radius: 6.0,
+            background: ColorConfig(hex_color!("#191919ee")),
+            gap: [10, 10],
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(default)]
+pub struct ItemConfig {
+    pub padding: u32,
+
+    pub border_radius: f32,
+    pub border_width: u32,
+    pub border_color: ColorConfig,
+    pub hover_border_color: ColorConfig,
+    pub active_border_color: ColorConfig,
+
+    pub background: ColorConfig,
+    pub hover_background: ColorConfig,
+    pub active_background: ColorConfig,
+
+    pub icon_size: u32,
+    pub text_color: ColorConfig,
+    pub gap: [u32; 2],
+}
+
+impl Default for ItemConfig {
+    fn default() -> Self {
+        Self {
+            padding: 7,
+
+            border_radius: 6.0,
+            border_width: 2,
+            border_color: ColorConfig(hex_color!("#eeeeee00")),
+            hover_border_color: ColorConfig(hex_color!("#eeeeee77")),
+            active_border_color: ColorConfig(hex_color!("#dddddd")),
+
+            background: ColorConfig(hex_color!("#11111100")),
+            hover_background: ColorConfig(hex_color!("#11111144")),
+            active_background: ColorConfig(hex_color!("#11111144")),
+
+            icon_size: 18,
+            text_color: ColorConfig(hex_color!("#bbbbbb")),
+            gap: [7, 5],
+        }
+    }
+}
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 pub enum RenderBackend {
     Default,
@@ -66,17 +126,15 @@ impl Into<Backends> for RenderBackend {
 pub struct Config {
     pub render_backend: RenderBackend,
     pub window: WindowConfig,
+    pub item: ItemConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            render_backend: RenderBackend::Default,
-            window: WindowConfig {
-                padding: 10,
-                corner_radius: 6.0,
-                background: ColorConfig(hex_color!("#20202044")),
-            },
+            render_backend: RenderBackend::Software,
+            window: WindowConfig::default(),
+            item: ItemConfig::default(),
         }
     }
 }
@@ -87,6 +145,7 @@ pub enum ConfigEvent {
 
 pub struct ConfigHandle {
     config: Config,
+    path: Option<PathBuf>,
     event_rx: UnboundedReceiver<ConfigEvent>,
 }
 
@@ -105,11 +164,6 @@ impl ConfigHandle {
         let config_dir = Self::get_config_dir().context("Config file location could not be determined (requires XDG_CONFIG_HOME or HOME env variable to be set)")?;
 
         let config_file = Path::new(&config_dir).join("alttabway.toml");
-
-        let old_config_file = Path::new(&config_dir).join("config.toml");
-        if old_config_file.exists() {
-            let _ = fs::remove_file(old_config_file);
-        }
 
         if !config_file.exists() {
             let _ = fs::create_dir_all(config_dir);
@@ -135,10 +189,13 @@ impl ConfigHandle {
                 tracing::warn!("Error using config file: {}", err);
                 return ConfigHandle {
                     config: Config::default(),
+                    path: None,
                     event_rx,
                 };
             }
         };
+
+        let path = Some(config_path.clone());
 
         tokio::spawn(async move {
             use notify::{Event, EventKind, event::ModifyKind};
@@ -173,14 +230,35 @@ impl ConfigHandle {
             }
         });
 
-        Self { config, event_rx }
+        Self {
+            config,
+            event_rx,
+            path,
+        }
     }
 
-    pub fn get(&self) -> &Config {
+    pub fn get_config(&self) -> &Config {
         &self.config
     }
 
     pub async fn recv(&mut self) -> Option<ConfigEvent> {
-        self.event_rx.recv().await
+        while let Some(event) = self.event_rx.recv().await {
+            match event {
+                ConfigEvent::Updated => {
+                    if let Some(path) = &self.path
+                        && let Ok(config_str) = fs::read_to_string(&path)
+                    {
+                        match toml::from_str::<Config>(&config_str) {
+                            Ok(new_config) => {
+                                self.config = new_config;
+                                return Some(event);
+                            }
+                            Err(err) => tracing::warn!("Failed to parsed updated config: {}", err),
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }

@@ -9,7 +9,7 @@ use tokio::{
 use tracing::{debug, trace};
 
 use crate::{
-    config_worker::{ConfigHandle, RenderBackend},
+    config_worker::{ConfigEvent, ConfigHandle, RenderBackend},
     geometry_worker::{GeometryWorker, GeometryWorkerEvent},
     gui::{Gui, GuiEvent},
     image_resizer::ImageResizer,
@@ -45,6 +45,8 @@ pub struct Daemon {
 
     /// Modifier keys that are required to be pressed for the window to show
     required_modifiers: Vec<Modifier>,
+
+    config_handle: ConfigHandle,
 }
 
 impl Daemon {
@@ -61,7 +63,7 @@ impl Daemon {
         let (renderer_tx, renderer_rx) = mpsc::unbounded_channel();
 
         let preview_resizer = ImageResizer::new();
-        let renderer: Box<dyn Renderer> = match config_handle.get().render_backend {
+        let renderer: Box<dyn Renderer> = match config_handle.get_config().render_backend {
             RenderBackend::Software => Box::new(SoftwareRenderer::new()),
             backends => Box::new(WgpuRenderer::new(backends).await?),
         };
@@ -78,13 +80,14 @@ impl Daemon {
             renderer_tx,
             renderer_rx,
             preview_resizer,
-            gui: Default::default(),
+            gui: Gui::new(config_handle.get_config()),
             pending_repaint: false,
             geometry_worker,
             ipc_listener,
             visible: false,
             screenshot_timer: Timer::new(Duration::from_secs(5)),
             required_modifiers: Self::DEFAULT_REQ_MODIFIER.to_vec(),
+            config_handle,
         };
 
         Daemon::run_loop(&mut daemon).await
@@ -238,7 +241,7 @@ impl Daemon {
                     }
                 }
                 result = self.screenshot_timer.wait() => {
-                    result?;
+                    result.context("screenshot timer has unexpectedly crashed")?;
 
                     let Some(active_window_id) = self.get_active_window_id() else { continue };
 
@@ -251,6 +254,13 @@ impl Daemon {
                                 self.update_visibility(false)?;
                                 self.wayland_client.activate_window(window_id);
                             }
+                        }
+                    }
+                }
+                Some(event) = self.config_handle.recv() => {
+                    match event {
+                        ConfigEvent::Updated => {
+                            self.gui.update_from_config(self.config_handle.get_config());
                         }
                     }
                 }

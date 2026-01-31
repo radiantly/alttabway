@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::time::Duration;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time;
@@ -31,8 +31,8 @@ impl Timer {
         Self { rx, internal_tx }
     }
 
-    pub async fn wait(&mut self) -> Result<()> {
-        self.rx.recv().await.context("Internal timer error")
+    pub async fn wait(&mut self) -> Option<()> {
+        self.rx.recv().await
     }
 
     pub async fn ping_after(&mut self, duration: Duration) -> Result<()> {
