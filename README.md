@@ -38,6 +38,10 @@ alttabway is now installed! Follow compositor specific instructions to start the
 
   </details>
 
+## Configuration
+
+When running `alttabway daemon`, it will create a configuration file in `~/.config/alttabway/alttabway.toml` with all the default configuration values if it doesn't exist. Here you can configure the colors and styles of the created window.
+
 ## FAQ
 
 #### The window preview is sometimes missing. Why?

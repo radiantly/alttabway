@@ -56,7 +56,7 @@ impl Default for WindowConfig {
         Self {
             padding: 10,
             border_radius: 6.0,
-            background: ColorConfig(hex_color!("#191919ee")),
+            background: ColorConfig(hex_color!("#222222ee")),
             gap: [10, 10],
         }
     }
@@ -90,8 +90,8 @@ impl Default for ItemConfig {
             border_radius: 6.0,
             border_width: 2,
             border_color: ColorConfig(hex_color!("#eeeeee00")),
-            hover_border_color: ColorConfig(hex_color!("#eeeeee77")),
-            active_border_color: ColorConfig(hex_color!("#dddddd")),
+            hover_border_color: ColorConfig(hex_color!("#6f6f6f77")),
+            active_border_color: ColorConfig(hex_color!("#ccccccff")),
 
             background: ColorConfig(hex_color!("#11111100")),
             hover_background: ColorConfig(hex_color!("#11111144")),
@@ -111,6 +111,12 @@ pub enum RenderBackend {
     Software,
 }
 
+impl Default for RenderBackend {
+    fn default() -> Self {
+        RenderBackend::Software
+    }
+}
+
 impl Into<Backends> for RenderBackend {
     fn into(self) -> Backends {
         match self {
@@ -121,22 +127,26 @@ impl Into<Backends> for RenderBackend {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// ```
+/// +----------------------------------------------------+
+/// | Window                                             |
+/// |   +--------------------+  +--------------------+   |
+/// |   |Item                |  |Item                |   |
+/// |   |+------------------+|  |+------------------+|   |
+/// |   ||Preview           ||  ||Preview           ||   |
+/// |   ||                  ||  ||                  ||   |
+/// |   ||                  ||  ||                  ||   |
+/// |   |+------------------+|  |+------------------+|   |
+/// |   +--------------------+  +--------------------+   |
+/// +----------------------------------------------------+
+/// ```
+#[derive(Default, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Set to `Software`, `Gl`, or `Vulkan`
     pub render_backend: RenderBackend,
     pub window: WindowConfig,
     pub item: ItemConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            render_backend: RenderBackend::Software,
-            window: WindowConfig::default(),
-            item: ItemConfig::default(),
-        }
-    }
 }
 
 pub enum ConfigEvent {
