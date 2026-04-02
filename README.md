@@ -42,6 +42,31 @@ alttabway is now installed! Follow compositor specific instructions to start the
 
 When running `alttabway daemon`, it will create a configuration file in `~/.config/alttabway/alttabway.toml` with all the default configuration values if it doesn't exist. Here you can configure the colors and styles of the created window.
 
+```toml
+# Set the render backend. Options: Default, Vulkan, Gl, Software
+render_backend = "Software"
+
+[window]
+padding = 10          # Outer padding around all items (px)
+border_radius = 6.0   # Corner radius of the window (px)
+background = "#222222ee"
+gap = [10, 10]        # Horizontal and vertical gap between items (px)
+
+[item]
+padding = 7           # Inner padding within each item (px)
+border_radius = 6.0   # Corner radius of each item (px)
+border_width = 2      # Border thickness (px)
+border_color = "#eeeeee00"
+hover_border_color = "#6f6f6f77"
+active_border_color = "#ccccccff"
+background = "#11111100"
+hover_background = "#11111144"
+active_background = "#11111144"
+icon_size = 18        # App icon size (px)
+text_color = "#bbbbbb"
+gap = [7, 5]          # Horizontal and vertical gap inside the item (px)
+```
+
 ## FAQ
 
 #### The window preview is sometimes missing. Why?
