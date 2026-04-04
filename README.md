@@ -1,5 +1,7 @@
 # alttabway
 
+[![GitHub](https://img.shields.io/badge/github-radiantly%2Falttabway-8da0cb?logo=github)](https://github.com/radiantly/alttabway) [![Crates.io](https://img.shields.io/crates/v/alttabway)](https://crates.io/crates/alttabway)
+
 Finally, an alt-tab window switcher with actual window previews. Currently supported compositors: Hyprland, Sway.
 
 ![Preview](https://cdn.jsdelivr.net/gh/radiantly/alttabway/.github/preview.webp)
