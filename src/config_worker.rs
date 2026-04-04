@@ -49,6 +49,7 @@ pub struct WindowConfig {
     pub border_radius: f32,
     pub background: ColorConfig,
     pub gap: [u32; 2],
+    pub max_width: u32,
 }
 
 impl Default for WindowConfig {
@@ -58,6 +59,7 @@ impl Default for WindowConfig {
             border_radius: 6.0,
             background: ColorConfig(hex_color!("#222222ee")),
             gap: [10, 10],
+            max_width: 50,
         }
     }
 }
@@ -270,5 +272,9 @@ impl ConfigHandle {
             }
         }
         None
+    }
+
+    pub fn requires_monitor_width(&self) -> bool {
+        self.config.window.max_width <= 100
     }
 }

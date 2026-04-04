@@ -7,7 +7,10 @@ use anyhow::bail;
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use smithay_client_toolkit::shm::slot::Buffer;
 use tokio::sync::mpsc::UnboundedSender;
-use wgpu::{Adapter, Backends, Instance, InstanceDescriptor, TextureFormat};
+use wgpu::{
+    Adapter, BackendOptions, Backends, CurrentSurfaceTexture, Instance, InstanceDescriptor,
+    InstanceFlags, MemoryBudgetThresholds, TextureFormat,
+};
 
 use crate::{
     gui::Gui,
@@ -46,9 +49,12 @@ pub struct WgpuRenderer {
 
 impl WgpuRenderer {
     pub async fn new(backends: impl Into<Backends>) -> anyhow::Result<Self> {
-        let instance = wgpu::Instance::new(&InstanceDescriptor {
+        let instance = wgpu::Instance::new(InstanceDescriptor {
             backends: backends.into(),
-            ..Default::default()
+            flags: InstanceFlags::default(),
+            memory_budget_thresholds: MemoryBudgetThresholds::default(),
+            backend_options: BackendOptions::default(),
+            display: None,
         });
 
         tracing::debug!("requesting adapter...");
@@ -102,14 +108,9 @@ impl WgpuRenderer {
         width: u32,
         height: u32,
     ) -> anyhow::Result<WgpuSurface> {
-        let RawHandles {
-            raw_display_handle,
-            raw_window_handle,
-        } = raw_handles;
-
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle,
-            raw_window_handle,
+            raw_display_handle: raw_handles.raw_display_handle.into(),
+            raw_window_handle: raw_handles.raw_window_handle,
         };
 
         let surface = unsafe { state.instance.create_surface_unsafe(target)? };
@@ -197,9 +198,11 @@ impl Renderer for WgpuRenderer {
             return Ok(());
         };
 
-        let output = surface.get_current_texture()?;
+        let CurrentSurfaceTexture::Success(surface_texture) = surface.get_current_texture() else {
+            return Ok(());
+        };
 
-        let view = output
+        let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -266,6 +269,7 @@ impl Renderer for WgpuRenderer {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             egui_renderer.render(
@@ -284,7 +288,7 @@ impl Renderer for WgpuRenderer {
         self.state.queue.submit(iter::once(encoder.finish()));
 
         tracing::trace!("Presenting output");
-        output.present();
+        surface_texture.present();
 
         tracing::trace!("Completed");
         Ok(())

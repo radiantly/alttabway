@@ -61,7 +61,7 @@ impl ItemVecExt for Vec<Item> {
 }
 
 pub struct LayoutParams {
-    window_max_width: u32,
+    window_raw_max_width: u32,
     pub window_corner_radius: f32,
     pub window_padding: u32,
     pub window_background: Color32,
@@ -94,6 +94,7 @@ impl LayoutParams {
         self.window_padding = config.window.padding;
         self.window_background = config.window.background.into();
         [self.items_horizontal_gap, self.items_vertical_gap] = config.window.gap;
+        self.window_raw_max_width = config.window.max_width;
 
         // ItemConfig
         self.item_padding = config.item.padding;
@@ -117,7 +118,7 @@ impl LayoutParams {
 impl Default for LayoutParams {
     fn default() -> Self {
         Self {
-            window_max_width: 800,
+            window_raw_max_width: Default::default(),
             window_corner_radius: Default::default(),
             window_padding: Default::default(),
             window_background: Default::default(),
@@ -166,6 +167,7 @@ pub struct GuiState {
     selected_item: usize,
     hovered_item: Option<usize>,
     needs_repaint: bool,
+    monitor_width: u32,
     layout_params: LayoutParams,
     layout_computed: LayoutComputed,
 }
@@ -271,6 +273,9 @@ impl GuiState {
     pub fn mark_repainted(&mut self) {
         self.needs_repaint = false;
     }
+    pub fn set_monitor_width(&mut self, width: u32) {
+        self.monitor_width = width;
+    }
 
     fn get_item_width(&self, item: &Item) -> u32 {
         let content_width = match item.preview {
@@ -288,6 +293,15 @@ impl GuiState {
             + self.layout_params.item_padding * 2
     }
 
+    fn get_window_max_width(&self) -> u32 {
+        if self.layout_params.window_raw_max_width > 100 {
+            return self.layout_params.window_raw_max_width;
+        };
+
+        let width = self.monitor_width * self.layout_params.window_raw_max_width / 100;
+        if width > 0 { width } else { 99999 }
+    }
+
     pub fn get_params(&self) -> &LayoutParams {
         &self.layout_params
     }
@@ -297,7 +311,7 @@ impl GuiState {
         self.layout_computed = Default::default();
 
         let available_row_width =
-            self.layout_params.window_max_width - self.layout_params.window_padding * 2;
+            self.get_window_max_width() - self.layout_params.window_padding * 2;
         let mut longest_row_width = 0;
 
         let mut rows: Vec<(Vec<u32>, u32)> = Vec::new();

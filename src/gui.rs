@@ -160,6 +160,10 @@ impl Gui {
         (layout.computed.window_width, layout.computed.window_height)
     }
 
+    pub fn set_monitor_width(&mut self, width: u32) {
+        self.state.set_monitor_width(width);
+    }
+
     fn build_ui(&mut self, raw_input: RawInput) -> FullOutput {
         let layout = self.state.calculate_layout();
         let mut hovered_item_updated = None;
@@ -171,14 +175,14 @@ impl Gui {
             item_style
         });
 
-        let full_output = self.egui_ctx.run(raw_input, |ctx: &Context| {
+        let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             let panel_frame = egui::Frame::new()
                 .fill(layout.params.window_background)
                 .corner_radius(layout.params.window_corner_radius);
 
             egui::CentralPanel::default()
                 .frame(panel_frame)
-                .show(ctx, |ui| {
+                .show_inside(ui, |ui| {
                     for (index, (rect, item)) in layout
                         .computed
                         .item_rects

@@ -51,6 +51,7 @@ padding = 10          # Outer padding around all items (px)
 border_radius = 6.0   # Corner radius of the window (px)
 background = "#222222ee"
 gap = [10, 10]        # Horizontal and vertical gap between items (px)
+max_width = 50        # If 1-100, the maximum width is the percentage of the total available width. If > 100, this is absolute maximum value in px
 
 [item]
 padding = 7           # Inner padding within each item (px)

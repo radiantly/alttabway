@@ -129,6 +129,7 @@ pub struct WaylandClient {
     themed_pointer: Option<ThemedPointer>,
     current_cursor: Option<CursorIcon>,
     requested_cursor: CursorIcon,
+    current_output: Option<WlOutput>,
 }
 
 pub struct RawHandles {
@@ -166,10 +167,12 @@ impl WaylandClient {
 
         // TODO: dynamic resizing
         let pool = SlotPool::new(1920 * 1920 * 4, &shm)?;
+        let output_state = OutputState::new(&globals, &qh);
+        let current_output = output_state.outputs().next().clone();
 
         let wayland_app = Self {
             registry_state: RegistryState::new(&globals),
-            output_state: OutputState::new(&globals, &qh),
+            output_state,
             connection,
             compositor_state,
             layer_shell,
@@ -186,6 +189,7 @@ impl WaylandClient {
             themed_pointer: None,
             current_cursor: None,
             requested_cursor: CursorIcon::Default,
+            current_output,
         };
 
         Ok((wayland_app, event_queue, wl_rx))
@@ -390,52 +394,66 @@ impl WaylandClient {
 
         Ok(())
     }
+
+    pub fn get_monitor_width(&self) -> Option<u32> {
+        let Some(current_output) = &self.current_output else {
+            tracing::warn!("No current output??");
+            return None;
+        };
+
+        let Some(info) = self.output_state.info(current_output) else {
+            tracing::warn!("Could not find output state for current output");
+            return None;
+        };
+
+        if let Some((output_w, _)) = info.logical_size {
+            (output_w as u32).into()
+        } else {
+            tracing::warn!("Logical size missing for current output");
+            None
+        }
+    }
 }
 
 impl CompositorHandler for WaylandClient {
     fn scale_factor_changed(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _new_factor: i32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: i32,
     ) {
     }
 
     fn transform_changed(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _new_transform: Transform,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: Transform,
     ) {
     }
 
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _time: u32,
-    ) {
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: u32) {
         self.wl_tx.send(WaylandClientEvent::PaintRequest).unwrap();
     }
 
     fn surface_enter(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _output: &WlOutput,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        output: &WlOutput,
     ) {
+        self.current_output = output.clone().into();
     }
 
     fn surface_leave(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &WlSurface,
-        _output: &WlOutput,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlSurface,
+        _: &WlOutput,
     ) {
     }
 }
@@ -445,26 +463,25 @@ impl OutputHandler for WaylandClient {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {}
 
-    fn update_output(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {}
 
-    fn output_destroyed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _output: WlOutput) {
-    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlOutput) {}
 }
 
 impl LayerShellHandler for WaylandClient {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
         // self.handler.closed();
     }
 
     fn configure(
         &mut self,
-        _connection: &Connection,
-        _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &LayerSurface,
         layer_surface_configure: LayerSurfaceConfigure,
-        _serial: u32,
+        _: u32,
     ) {
         self.wl_tx
             .send(WaylandClientEvent::LayerShellConfigure(
@@ -487,11 +504,11 @@ impl SeatHandler for WaylandClient {
         &mut self.seat_state
     }
 
-    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat) {}
 
     fn new_capability(
         &mut self,
-        _conn: &Connection,
+        _: &Connection,
         qh: &QueueHandle<Self>,
         seat: WlSeat,
         capability: Capability,
@@ -519,45 +536,45 @@ impl SeatHandler for WaylandClient {
 
     fn remove_capability(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _seat: WlSeat,
-        _capability: Capability,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: WlSeat,
+        _: Capability,
     ) {
     }
 
-    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _seat: WlSeat) {}
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat) {}
 }
 
 impl KeyboardHandler for WaylandClient {
     fn enter(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &WlKeyboard,
-        _surface: &WlSurface,
-        _serial: u32,
-        _raw: &[u32],
-        _keysyms: &[Keysym],
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: &WlSurface,
+        _: u32,
+        _: &[u32],
+        _: &[Keysym],
     ) {
     }
 
     fn leave(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &WlKeyboard,
-        _surface: &WlSurface,
-        _serial: u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: &WlSurface,
+        _: u32,
     ) {
     }
 
     fn press_key(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &WlKeyboard,
-        _serial: u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: u32,
         event: KeyEvent,
     ) {
         if let Ok(event) = WaylandClientEvent::from_wl_key_event(event, true, false, self.modifiers)
@@ -568,10 +585,10 @@ impl KeyboardHandler for WaylandClient {
 
     fn release_key(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &WlKeyboard,
-        _serial: u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: u32,
         event: KeyEvent,
     ) {
         if let Ok(event) =
@@ -583,13 +600,13 @@ impl KeyboardHandler for WaylandClient {
 
     fn update_modifiers(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &WlKeyboard,
-        _serial: u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: u32,
         modifiers: Modifiers,
-        _raw_modifiers: smithay_client_toolkit::seat::keyboard::RawModifiers,
-        _layout: u32,
+        _: smithay_client_toolkit::seat::keyboard::RawModifiers,
+        _: u32,
     ) {
         self.modifiers = modifiers;
         self.wl_tx.send(WaylandClientEvent::ModifierChange).unwrap();
@@ -597,10 +614,10 @@ impl KeyboardHandler for WaylandClient {
 
     fn repeat_key(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _keyboard: &WlKeyboard,
-        _serial: u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        _: u32,
         event: KeyEvent,
     ) {
         if let Ok(event) = WaylandClientEvent::from_wl_key_event(event, true, true, self.modifiers)
@@ -613,9 +630,9 @@ impl KeyboardHandler for WaylandClient {
 impl PointerHandler for WaylandClient {
     fn pointer_frame(
         &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _pointer: &WlPointer,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlPointer,
         events: &[PointerEvent],
     ) {
         // Set cursor on enter events
@@ -650,12 +667,12 @@ delegate_shm!(WaylandClient);
 // Screencopy manager implementation
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for WaylandClient {
     fn event(
-        _state: &mut Self,
-        _proxy: &ZwlrScreencopyManagerV1,
-        _event: <ZwlrScreencopyManagerV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        _: &mut Self,
+        _: &ZwlrScreencopyManagerV1,
+        _: <ZwlrScreencopyManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
     }
 }
@@ -666,9 +683,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
         state: &mut Self,
         frame: &ZwlrScreencopyFrameV1,
         event: zwlr_screencopy_frame_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
         use zwlr_screencopy_frame_v1::Event;
 
@@ -774,11 +791,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for WaylandClient {
     fn event(
         state: &mut Self,
-        _manager: &ZwlrForeignToplevelManagerV1,
+        _: &ZwlrForeignToplevelManagerV1,
         event: zwlr_foreign_toplevel_manager_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
         use zwlr_foreign_toplevel_manager_v1::Event;
 
@@ -810,9 +827,9 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for WaylandClient {
         state: &mut Self,
         handle: &ZwlrForeignToplevelHandleV1,
         event: zwlr_foreign_toplevel_handle_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
         use zwlr_foreign_toplevel_handle_v1::Event;
 

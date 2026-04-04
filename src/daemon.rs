@@ -296,6 +296,12 @@ impl Daemon {
             tracing::trace!("VISIBILITY CALLED");
             self.gui.reset_selected_item();
 
+            if self.config_handle.requires_monitor_width()
+                && let Some(monitor_width) = self.wayland_client.get_monitor_width()
+            {
+                tracing::trace!("Monitor width: {}", monitor_width);
+                self.gui.set_monitor_width(monitor_width);
+            }
             (self.width, self.height) = self.gui.get_window_dimensions();
 
             self.wayland_client.create_surfaces(
