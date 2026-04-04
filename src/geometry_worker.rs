@@ -1,5 +1,8 @@
 use crate::geometry_provider::GeometryProvider;
-use crate::{geometry_ipc::HyprlandIpc, geometry_provider::Geometry};
+use crate::{
+    geometry_ipc::{HyprlandIpc, SwayIpc},
+    geometry_provider::Geometry,
+};
 use anyhow::{Result, bail};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
@@ -21,6 +24,8 @@ pub struct GeometryWorker<U: Copy + Send + 'static> {
 impl<U: Copy + Send + 'static> GeometryWorker<U> {
     pub fn new() -> Result<Self> {
         let mut provider: Box<dyn GeometryProvider + Send> = if let Ok(ipc) = HyprlandIpc::new() {
+            Box::new(ipc)
+        } else if let Ok(ipc) = SwayIpc::new() {
             Box::new(ipc)
         } else {
             bail!("no geometry provider");

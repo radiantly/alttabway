@@ -1,7 +1,7 @@
 use std::{mem, time::Duration};
 
 use anyhow::Context;
-use smithay_client_toolkit::reexports::client::EventQueue;
+use smithay_client_toolkit::reexports::client::{EventQueue, protocol::wl_shm::Format};
 use tokio::{
     io::unix::AsyncFd,
     sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -169,15 +169,21 @@ impl Daemon {
                         WaylandClientEvent::TopLevelTitleUpdate(id, new_title) => self.gui.update_item_title(id, new_title),
                         WaylandClientEvent::TopLevelAppIdUpdate(id, new_app_id) => self.gui.update_item_app_id(id, new_app_id),
                         WaylandClientEvent::TopLevelRemoved(id) => self.gui.remove_item(id),
-                        WaylandClientEvent::ScreencopyDone(id, buffer) => {
+                        WaylandClientEvent::ScreencopyDone(id, buffer, format) => {
                             let _span = tracing::trace_span!("Resize", id=id).entered();
                             tracing::trace!("start");
 
-                            // TODO: Zero-copy is technically possible with unsafe ... or reimplementing the pool to allow multithreaded access
-                            let pixels = self.wayland_client.get_buffer_mut(&buffer, |slice| slice.to_vec());
+                            let pixels = self.wayland_client.get_buffer_mut(&buffer, |slice| {
+                                match format {
+                                    Format::Argb8888 | Format::Xrgb8888 =>
+                                        slice.chunks(4).flat_map(|p| [p[2], p[1], p[0]]).collect(),
+                                    Format::Bgr888 => slice.to_vec(),
+                                    _ => panic!("unknown format")
+                                }
+                            });
 
-                            let (width, height) = ((buffer.stride() / 4) as u32, buffer.height() as u32);
-                            self.preview_resizer.resize_bgra_pixels(id, (pixels, width), self.gui.calculate_preview_size((width, height)));
+                            let (width, height) = (pixels.len() as u32 / buffer.height() as u32 / 3, buffer.height() as u32);
+                            self.preview_resizer.resize_rgb_pixels(id, (pixels, width), self.gui.calculate_preview_size((width, height)));
                         }
                     }
                 },

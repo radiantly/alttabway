@@ -229,15 +229,29 @@ impl ConfigHandle {
                 return;
             };
 
-            while let Ok(event) = rx.recv() {
-                if let Ok(Event {
-                    kind: EventKind::Modify(ModifyKind::Data(_)),
-                    ..
-                }) = event
-                {
-                    if event_tx.send(ConfigEvent::Updated).is_err() {
+            let (async_tx, mut async_rx) = tokio::sync::mpsc::unbounded_channel();
+            std::thread::spawn(move || {
+                while let Ok(val) = rx.recv() {
+                    if async_tx.send(val).is_err() {
                         break;
                     }
+                }
+            });
+
+            loop {
+                tokio::select! {
+                    Some(event) = async_rx.recv() => {
+                        if let Ok(Event {
+                            kind: EventKind::Modify(ModifyKind::Data(_)),
+                            ..
+                        }) = event
+                        {
+                            if event_tx.send(ConfigEvent::Updated).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    _ = event_tx.closed() => break
                 }
             }
         });

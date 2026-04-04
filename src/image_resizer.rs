@@ -41,23 +41,23 @@ impl<T: Send + 'static> ImageResizer<T> {
         });
     }
 
-    pub fn resize_bgra_pixels(&mut self, key: T, source: (Vec<u8>, u32), destination: (u32, u32)) {
+    pub fn resize_rgb_pixels(&mut self, key: T, source: (Vec<u8>, u32), destination: (u32, u32)) {
         let (mut pixels, width) = source;
-        let height = pixels.len() as u32 / width / 4;
+        let height = pixels.len() as u32 / width / 3;
 
         let (dst_width, dst_height) = destination;
         let sender = self.sender.clone();
         tokio::spawn(async move {
-            let src_image = match ImageRef::new(width, height, &mut pixels, PixelType::U8x4) {
+            let src_image = match ImageRef::new(width, height, &mut pixels, PixelType::U8x3) {
                 Ok(image_ref) => image_ref,
                 Err(err) => {
                     tracing::warn!("Failed to read pixels as image: {}", err);
                     return;
                 }
             };
-            let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8x4);
+            let mut dst_image = Image::new(dst_width, dst_height, PixelType::U8x3);
 
-            tracing::trace!(
+            tracing::debug!(
                 "attempting to resize image! {}x{} => {}x{}",
                 width,
                 height,
@@ -69,10 +69,6 @@ impl<T: Send + 'static> ImageResizer<T> {
             if let Err(err) = resizer.resize(&src_image, &mut dst_image, None) {
                 tracing::warn!("failed to resize image! {}", err);
                 return;
-            }
-
-            for chunk in dst_image.buffer_mut().chunks_exact_mut(4) {
-                chunk.swap(0, 2);
             }
 
             let _ = sender.send((key, dst_image));

@@ -1,6 +1,6 @@
 # alttabway
 
-Finally, an alt-tab window switcher with actual window previews. Only Hyprland is supported at the moment.
+Finally, an alt-tab window switcher with actual window previews. Currently supported compositors: Hyprland, Sway.
 
 ![Preview](https://cdn.jsdelivr.net/gh/radiantly/alttabway/.github/preview.webp)
 
@@ -27,16 +27,15 @@ alttabway is now installed! Follow compositor specific instructions to start the
   layerrule = blur on, ignore_alpha 0, match:namespace ^alttabway$
   ```
 
-  <details>
-  <summary>Configuration options</summary>
+- #### Sway
 
-  ```ini
-  # Activate using Ctrl+Super+Tab
-  binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
-  binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super
+  Add the following lines to your `~/.config/sway/config`
+
   ```
-
-  </details>
+  exec alttabway daemon
+  bindsym Mod1+Tab exec alttabway show --next
+  bindsym Mod1+Shift+Tab exec alttabway show --previous
+  ```
 
 ## Configuration
 
@@ -80,11 +79,17 @@ Window preview resizing runs on the main thread and needs to move to a backgroun
 
 #### Can I use a different hotkey combination?
 
-No
+You can use a different modifier key by specifying it via the `--modifiers-held` flag. Example Hyprland configuration:
+
+```ini
+# Activate using Ctrl+Super+Tab
+binde = CTRL SUPER, Tab, exec, alttabway show --next --modifiers-held ctrl,super
+binde = CTRL SUPER SHIFT, Tab, exec, alttabway show --previous --modifiers-held ctrl,super
+```
 
 #### Please support $COMPOSITOR
 
-alttabway only provides support for Hyprland (Sway and Niri coming in the near future). Open an issue if you'd like support for your compositor. Typically the compositor should implement the following protocols.
+alttabway currently supports Hyprland and Sway. Open an issue if you'd like support for your compositor. Typically the compositor should implement the following protocols.
 
 - wlr-foreign-toplevel-management-unstable-v1 for the list of top level windows and to activate one
 - wlr-screencopy-unstable-v1 to take a capture of a region on screen.

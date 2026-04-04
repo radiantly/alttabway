@@ -209,9 +209,9 @@ impl GuiState {
         load_texture: impl FnOnce(String, ColorImage) -> TextureHandle,
     ) {
         self.items.with_id(id, |item| {
-            let (rgba, width) = preview;
-            let image_size = [width, rgba.len() / width / 4];
-            let color_image = ColorImage::from_rgba_unmultiplied(image_size, rgba);
+            let (rgb, width) = preview;
+            let image_size = [width, rgb.len() / width / 3];
+            let color_image = ColorImage::from_rgb(image_size, rgb);
 
             if let Some((texture_handle, size)) = &mut item.preview {
                 texture_handle.set(color_image, Default::default());

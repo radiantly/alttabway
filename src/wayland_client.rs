@@ -366,7 +366,7 @@ impl WaylandClient {
             let relative_x = x - output_x;
             let relative_y = y - output_y;
 
-            if (0..=output_w).contains(&relative_x) && (0..=output_h).contains(&relative_y) {
+            if (0..output_w).contains(&relative_x) && (0..output_h).contains(&relative_y) {
                 (output, relative_x, relative_y).into()
             } else {
                 None
@@ -711,7 +711,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 let WEnum::Value(format) = format else { return };
 
                 match format {
-                    Format::Argb8888 | Format::Xrgb8888 => (),
+                    Format::Argb8888 | Format::Xrgb8888 | Format::Bgr888 => (),
                     _ => return,
                 };
 
@@ -762,12 +762,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 if let Some(ScreencopyFrameState {
                     id,
                     buffer: Some(buffer),
+                    format: Some(format),
                     ..
                 }) = state.screencopy_frames.remove(frame)
                 {
                     state
                         .wl_tx
-                        .send(WaylandClientEvent::ScreencopyDone(id, buffer))
+                        .send(WaylandClientEvent::ScreencopyDone(id, buffer, format))
                         .unwrap();
                 }
                 frame.destroy();

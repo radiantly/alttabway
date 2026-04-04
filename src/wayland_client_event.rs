@@ -1,5 +1,6 @@
 use anyhow::bail;
 use smithay_client_toolkit::{
+    reexports::client::protocol::wl_shm::Format,
     seat::{
         keyboard::{KeyEvent, Keysym, Modifiers},
         pointer::{PointerEvent, PointerEventKind},
@@ -19,7 +20,7 @@ pub enum WaylandClientEvent {
     TopLevelTitleUpdate(u32, String),
     TopLevelAppIdUpdate(u32, String),
     TopLevelRemoved(u32),
-    ScreencopyDone(u32, Buffer),
+    ScreencopyDone(u32, Buffer, Format),
 }
 
 impl WaylandClientEvent {
