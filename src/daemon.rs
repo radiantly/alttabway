@@ -177,6 +177,8 @@ impl Daemon {
                                 match format {
                                     Format::Argb8888 | Format::Xrgb8888 =>
                                         slice.chunks(4).flat_map(|p| [p[2], p[1], p[0]]).collect(),
+                                    Format::Abgr8888 | Format::Xbgr8888 =>
+                                        slice.chunks(4).flat_map(|p| [p[0], p[1], p[2]]).collect(),
                                     Format::Bgr888 => slice.to_vec(),
                                     _ => panic!("unknown format")
                                 }

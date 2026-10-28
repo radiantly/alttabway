@@ -711,7 +711,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for WaylandClient {
                 let WEnum::Value(format) = format else { return };
 
                 match format {
-                    Format::Argb8888 | Format::Xrgb8888 | Format::Bgr888 => (),
+                    Format::Argb8888
+                    | Format::Xrgb8888
+                    | Format::Abgr8888
+                    | Format::Xbgr8888
+                    | Format::Bgr888 => (),
                     _ => return,
                 };
 
