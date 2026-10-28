@@ -44,15 +44,45 @@ lazy_static! {
 }
 
 impl IconHelper {
-    const ICON_SYSTEM_DIRS: [&str; 3] = [
+    const ICON_SYSTEM_DIRS: [&str; 13] = [
         "/usr/share/icons/hicolor/256x256/apps",
+        "/usr/share/icons/hicolor/128x128/apps",
         "/usr/share/icons/hicolor/48x48/apps",
         "/usr/share/pixmaps",
+        "/usr/local/share/icons/hicolor/256x256/apps",
+        "/usr/local/share/icons/hicolor/128x128/apps",
+        "/usr/local/share/icons/hicolor/48x48/apps",
+        "/usr/local/share/pixmaps",
+        "/var/lib/flatpak/exports/share/icons/hicolor/256x256/apps",
+        "/var/lib/flatpak/exports/share/icons/hicolor/128x128/apps",
+        "/var/lib/flatpak/exports/share/icons/hicolor/48x48/apps",
+        "/var/lib/snapd/desktop/icons/hicolor/256x256/apps",
+        "/run/current-system/sw/share/icons/hicolor/256x256/apps",
     ];
-    const ICON_USER_DIRS: [&str; 2] = [".local/share/icons", ".icons"];
+    const ICON_USER_DIRS: [&str; 10] = [
+        ".local/share/icons",
+        ".local/share/icons/hicolor/256x256/apps",
+        ".local/share/icons/hicolor/128x128/apps",
+        ".local/share/icons/hicolor/48x48/apps",
+        ".local/share/flatpak/exports/share/icons",
+        ".local/share/flatpak/exports/share/icons/hicolor/256x256/apps",
+        ".local/share/flatpak/exports/share/icons/hicolor/128x128/apps",
+        ".local/share/flatpak/exports/share/icons/hicolor/48x48/apps",
+        ".local/share/xdg-desktop-portal/icons",
+        ".icons",
+    ];
 
-    const DESKTOP_SYSTEM_DIRS: [&str; 1] = ["/usr/share/applications"];
-    const DESKTOP_USER_DIRS: [&str; 1] = [".local/share/applications"];
+    const DESKTOP_SYSTEM_DIRS: [&str; 5] = [
+        "/usr/share/applications",
+        "/usr/local/share/applications",
+        "/var/lib/flatpak/exports/share/applications",
+        "/var/lib/snapd/desktop/applications",
+        "/run/current-system/sw/share/applications",
+    ];
+    const DESKTOP_USER_DIRS: [&str; 2] = [
+        ".local/share/applications",
+        ".local/share/flatpak/exports/share/applications",
+    ];
 
     fn find_icon_file(file_name: &str) -> Option<PathBuf> {
         for icon_dir in ICON_DIRS.iter() {
@@ -94,7 +124,7 @@ impl IconHelper {
             let file_stem_matches = desktop_file
                 .file_stem()
                 .and_then(OsStr::to_str)
-                .is_some_and(|stem| stem == app_id);
+                .is_some_and(|stem| stem.eq_ignore_ascii_case(app_id));
 
             let exec_matches = ini
                 .section(Some("Desktop Entry"))
@@ -129,14 +159,14 @@ impl IconHelper {
         };
 
         let token = token.trim_matches('"');
-        if token == app_id {
+        if token.eq_ignore_ascii_case(app_id) {
             return true;
         }
 
         Path::new(token)
             .file_stem()
             .and_then(OsStr::to_str)
-            .is_some_and(|stem| stem == app_id)
+            .is_some_and(|stem| stem.eq_ignore_ascii_case(app_id))
     }
 
     fn resolve_icon_path(icon_value: &str) -> Option<PathBuf> {
